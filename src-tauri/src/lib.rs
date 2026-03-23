@@ -323,6 +323,26 @@ async fn batch_add_sessions(
 }
 
 #[tauri::command]
+fn authenticate_session(sess: &mut Session, session_info: &SessionInfo) -> Result<(), String> {
+    if let Some(ref key_path) = session_info.key_path {
+        if !key_path.is_empty() {
+            let path = std::path::Path::new(key_path);
+            sess.userauth_pubkey_file(&session_info.user, None, path, None)
+                .map_err(|e| format!("Key auth failed: {}", e))?;
+            return Ok(());
+        }
+    }
+    
+    if let Some(ref pass) = session_info.password {
+        sess.userauth_password(&session_info.user, pass)
+            .map_err(|e| format!("Password auth failed: {}", e))?;
+        return Ok(());
+    }
+
+    Err("Neither key path nor password provided".to_string())
+}
+
+#[tauri::command]
 async fn run_command_all(
     app_handle: AppHandle,
     command: String,
@@ -369,19 +389,7 @@ async fn run_command_all(
                 sess.set_tcp_stream(tcp);
                 sess.handshake().map_err(|e| e.to_string())?;
 
-                if let Some(ref key_path) = session_info.key_path {
-                    if !key_path.is_empty() {
-                        let path = std::path::Path::new(key_path);
-                        sess.userauth_pubkey_file(&session_info.user, None, path, None)
-                            .map_err(|e| format!("Key auth failed: {}", e))?;
-                    } else if let Some(ref pass) = session_info.password {
-                        sess.userauth_password(&session_info.user, pass)
-                            .map_err(|e| format!("Password auth failed: {}", e))?;
-                    }
-                } else if let Some(ref pass) = session_info.password {
-                    sess.userauth_password(&session_info.user, pass)
-                        .map_err(|e| format!("Password auth failed: {}", e))?;
-                }
+                authenticate_session(&mut sess, &session_info)?;
 
                 let mut channel = sess.channel_session().map_err(|e| e.to_string())?;
                 channel.exec(&cmd_for_exec).map_err(|e| e.to_string())?;
@@ -409,6 +417,189 @@ async fn run_command_all(
                         Err(err) => {
                             session.status = SessionStatus::Failure;
                             session.history.push(format!("$ {}\nError: {}", cmd_clone, err));
+                        }
+                    }
+                    let _ = window_clone.emit("session_updated", session.clone());
+                }
+            }
+        });
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn distribute_file(
+    app_handle: AppHandle,
+    local_path: String,
+    remote_dir: String,
+    window: tauri::Window,
+    ids: Option<Vec<String>>,
+) -> Result<(), String> {
+    let state = app_handle.state::<AppState>();
+    let session_ids: Vec<String> = if let Some(ids) = ids {
+        ids
+    } else {
+        state.sessions.iter().map(|kv| kv.key().clone()).collect()
+    };
+    
+    let local_path_buf = std::path::PathBuf::from(&local_path);
+    let file_name = local_path_buf.file_name()
+        .ok_or_else(|| "Invalid local path".to_string())?
+        .to_str()
+        .ok_or_else(|| "Invalid file name".to_string())?
+        .to_string();
+    
+    let file_content = std::fs::read(&local_path).map_err(|e| format!("Failed to read local file: {}", e))?;
+    let file_size = file_content.len() as u64;
+
+    for id in session_ids {
+        let app_clone = app_handle.clone();
+        let id_clone = id.clone();
+        let remote_dir_thread = remote_dir.clone();
+        let remote_dir_history = remote_dir.clone();
+        let file_name_clone = file_name.clone();
+        let file_content_clone = file_content.clone();
+        let window_clone = window.clone();
+        
+        tokio::spawn(async move {
+            let state = app_clone.state::<AppState>();
+            let session_info = {
+                let session_ref = state.sessions.get(&id_clone);
+                match session_ref {
+                    Some(s) => s.value().clone(),
+                    None => return,
+                }
+            };
+
+            {
+                let mut session_ref = state.sessions.get_mut(&id_clone);
+                if let Some(session) = session_ref.as_deref_mut() {
+                    session.status = SessionStatus::Running;
+                    let _ = window_clone.emit("session_updated", session.clone());
+                }
+            }
+            
+            let result = thread::spawn(move || -> Result<String, String> {
+                let tcp = TcpStream::connect(format!("{}:{}", session_info.host, session_info.port))
+                    .map_err(|e| e.to_string())?;
+                let mut sess = Session::new().map_err(|e| e.to_string())?;
+                sess.set_tcp_stream(tcp);
+                sess.handshake().map_err(|e| e.to_string())?;
+
+                authenticate_session(&mut sess, &session_info)?;
+
+                let mut remote_path = remote_dir_thread;
+                if !remote_path.ends_with('/') && !remote_path.is_empty() {
+                    remote_path.push('/');
+                }
+                remote_path.push_str(&file_name_clone);
+
+                let mut remote_file = sess.scp_send(std::path::Path::new(&remote_path), 0o644, file_size, None)
+                    .map_err(|e| e.to_string())?;
+                remote_file.write_all(&file_content_clone).map_err(|e| e.to_string())?;
+                
+                Ok(format!("Successfully uploaded to {}", remote_path))
+            }).join().unwrap_or(Err("Thread panicked".to_string()));
+
+            {
+                let mut session_ref = state.sessions.get_mut(&id_clone);
+                if let Some(session) = session_ref.as_deref_mut() {
+                    match result {
+                        Ok(msg) => {
+                            session.status = SessionStatus::Success;
+                            session.history.push(format!("[File] {}", msg));
+                        }
+                        Err(err) => {
+                            session.status = SessionStatus::Failure;
+                            session.history.push(format!("[File] Error distributing to {}: {}", remote_dir_history, err));
+                        }
+                    }
+                    let _ = window_clone.emit("session_updated", session.clone());
+                }
+            }
+        });
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn distribute_file_data(
+    app_handle: AppHandle,
+    file_name: String,
+    file_content: Vec<u8>,
+    remote_dir: String,
+    window: tauri::Window,
+    ids: Option<Vec<String>>,
+) -> Result<(), String> {
+    let state = app_handle.state::<AppState>();
+    let session_ids: Vec<String> = if let Some(ids) = ids {
+        ids
+    } else {
+        state.sessions.iter().map(|kv| kv.key().clone()).collect()
+    };
+    
+    let file_size = file_content.len() as u64;
+
+    for id in session_ids {
+        let app_clone = app_handle.clone();
+        let id_clone = id.clone();
+        let remote_dir_thread = remote_dir.clone();
+        let remote_dir_history = remote_dir.clone();
+        let file_name_clone = file_name.clone();
+        let file_content_clone = file_content.clone();
+        let window_clone = window.clone();
+        
+        tokio::spawn(async move {
+            let state = app_clone.state::<AppState>();
+            let session_info = {
+                let session_ref = state.sessions.get(&id_clone);
+                match session_ref {
+                    Some(s) => s.value().clone(),
+                    None => return,
+                }
+            };
+
+            {
+                let mut session_ref = state.sessions.get_mut(&id_clone);
+                if let Some(session) = session_ref.as_deref_mut() {
+                    session.status = SessionStatus::Running;
+                    let _ = window_clone.emit("session_updated", session.clone());
+                }
+            }
+            
+            let result = thread::spawn(move || -> Result<String, String> {
+                let tcp = TcpStream::connect(format!("{}:{}", session_info.host, session_info.port))
+                    .map_err(|e| e.to_string())?;
+                let mut sess = Session::new().map_err(|e| e.to_string())?;
+                sess.set_tcp_stream(tcp);
+                sess.handshake().map_err(|e| e.to_string())?;
+
+                authenticate_session(&mut sess, &session_info)?;
+
+                let mut remote_path = remote_dir_thread;
+                if !remote_path.ends_with('/') && !remote_path.is_empty() {
+                    remote_path.push('/');
+                }
+                remote_path.push_str(&file_name_clone);
+
+                let mut remote_file = sess.scp_send(std::path::Path::new(&remote_path), 0o644, file_size, None)
+                    .map_err(|e| e.to_string())?;
+                remote_file.write_all(&file_content_clone).map_err(|e| e.to_string())?;
+                
+                Ok(format!("Successfully uploaded to {}", remote_path))
+            }).join().unwrap_or(Err("Thread panicked".to_string()));
+
+            {
+                let mut session_ref = state.sessions.get_mut(&id_clone);
+                if let Some(session) = session_ref.as_deref_mut() {
+                    match result {
+                        Ok(msg) => {
+                            session.status = SessionStatus::Success;
+                            session.history.push(format!("[File] {}", msg));
+                        }
+                        Err(err) => {
+                            session.status = SessionStatus::Failure;
+                            session.history.push(format!("[File] Error distributing to {}: {}", remote_dir_history, err));
                         }
                     }
                     let _ = window_clone.emit("session_updated", session.clone());
@@ -474,6 +665,8 @@ pub fn run() {
             add_session,
             batch_add_sessions,
             run_command_all, 
+            distribute_file,
+            distribute_file_data,
             get_sessions,
             get_scripts,
             delete_session,

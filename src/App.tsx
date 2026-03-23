@@ -1,27 +1,16 @@
 import { useState, useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Plus, Settings, Terminal as TerminalIcon, Users, Trash2, ChevronLeft, Play, ChevronDown, ChevronRight, GripVertical, Check, Minus } from "lucide-react";
+import { Plus, Settings, Terminal as TerminalIcon, Users, Trash2, ChevronLeft, Play, ChevronDown, ChevronRight, GripVertical, Check, Minus, Upload, FileText } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
 import SSHTerminal from "./components/SSHTerminal";
 import TitleBar from "./components/TitleBar";
 import { cn } from "@/lib/utils";
-
-const Textarea = (({ className, ...props }: React.ComponentProps<"textarea">) => {
-  return (
-    <textarea
-      className={cn(
-        "flex min-h-[80px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50",
-        className
-      )}
-      {...props}
-    />
-  )
-})
 
 // --- Types ---
 interface SessionInfo {
@@ -60,6 +49,12 @@ function App() {
   const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(new Set());
   const [historySession, setHistorySession] = useState<SessionInfo | null>(null);
   const [isInitialized, setIsInitialized] = useState(false);
+  
+  // File distribution state
+  const [isFileDialogOpen, setIsFileDialogOpen] = useState(false);
+  const [remoteDir, setRemoteDir] = useState('/tmp');
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
   
   const [tabs, setTabs] = useState<Tab[]>([{ id: 'default', sessionId: null }]);
   const [activeTabIndex, setActiveTabIndex] = useState(0);
@@ -108,6 +103,36 @@ function App() {
     if (!isInitialized && data.length > 0) {
       setSelectedSessionIds(new Set(data.map(s => s.id)));
       setIsInitialized(true);
+    }
+  };
+
+  const handleFileDistribute = async () => {
+    if (!selectedFile) return;
+    setIsUploading(true);
+    try {
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        const content = e.target?.result as ArrayBuffer;
+        if (content) {
+          try {
+            await invoke('distribute_file_data', {
+              fileName: selectedFile.name,
+              fileContent: Array.from(new Uint8Array(content)),
+              remoteDir: remoteDir,
+              ids: Array.from(selectedSessionIds)
+            });
+            setIsFileDialogOpen(false);
+            setSelectedFile(null);
+          } catch (err) {
+            console.error("Failed to distribute file:", err);
+          }
+        }
+        setIsUploading(false);
+      };
+      reader.readAsArrayBuffer(selectedFile);
+    } catch (err) {
+      console.error("Failed to read file:", err);
+      setIsUploading(false);
     }
   };
 
@@ -401,17 +426,33 @@ function App() {
             <h2 className="text-2xl font-bold mb-6">SSH 一对多同步</h2>
             <Card className="mb-8 bg-card/60 backdrop-blur-sm">
                 <CardContent className="pt-6">
-                <form onSubmit={(e) => { e.preventDefault(); invoke("run_command_all", { command: broadcastCmd, ids: Array.from(selectedSessionIds) }); setBroadcastCmd(""); }} className="flex gap-2">
-                    <Input 
-                    value={broadcastCmd} 
-                    onChange={e => setBroadcastCmd(e.target.value)} 
-                    placeholder="输入要分发的命令..." 
-                    className="bg-background/50"
+                <div className="flex flex-col gap-4">
+                  <div className="flex flex-col gap-2">
+                    <Textarea 
+                      value={broadcastCmd} 
+                      onChange={e => setBroadcastCmd(e.target.value)} 
+                      placeholder="输入要分发的命令 (支持多行)..." 
+                      className="bg-background/50 min-h-[100px] font-mono"
                     />
-                    <Button type="submit" className="gap-2" disabled={selectedSessionIds.size === 0}>
-                    <Play size={14} /> 执行分发
-                    </Button>
-                </form>
+                    <div className="flex gap-2">
+                      <Button 
+                        onClick={() => { invoke("run_command_all", { command: broadcastCmd, ids: Array.from(selectedSessionIds) }); setBroadcastCmd(""); }} 
+                        className="gap-2 flex-1" 
+                        disabled={selectedSessionIds.size === 0 || !broadcastCmd.trim()}
+                      >
+                        <Play size={14} /> 执行命令分发
+                      </Button>
+                      <Button 
+                        variant="secondary"
+                        onClick={() => setIsFileDialogOpen(true)} 
+                        className="gap-2" 
+                        disabled={selectedSessionIds.size === 0}
+                      >
+                        <Upload size={14} /> 分发文件
+                      </Button>
+                    </div>
+                  </div>
+                </div>
                 </CardContent>
             </Card>
             
@@ -770,6 +811,55 @@ function App() {
           <DialogFooter>
             <Button variant="outline" onClick={() => setShowNewGroupModal(false)}>取消</Button>
             <Button onClick={() => handleCreateGroup(newGroupName)}>创建并移动</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* File Distribution Modal */}
+      <Dialog open={isFileDialogOpen} onOpenChange={setIsFileDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>分发文件</DialogTitle>
+            <DialogDescription>选择一个本地文件并输入目标目录，文件将被发送到所有选中的主机。</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 py-4">
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">选择文件</label>
+              <div className="flex items-center gap-2">
+                <Button 
+                  variant="outline" 
+                  className="w-full justify-start gap-2 h-10 overflow-hidden text-ellipsis"
+                  onClick={() => document.getElementById('fileInput')?.click()}
+                >
+                  <FileText size={16} className="shrink-0" />
+                  {selectedFile ? selectedFile.name : "点击选择文件..."}
+                </Button>
+                <input 
+                  id="fileInput"
+                  type="file" 
+                  className="hidden" 
+                  onChange={(e) => setSelectedFile(e.target.files?.[0] || null)}
+                />
+              </div>
+            </div>
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">目标目录</label>
+              <Input 
+                value={remoteDir} 
+                onChange={e => setRemoteDir(e.target.value)} 
+                placeholder="例如: /tmp" 
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIsFileDialogOpen(false)}>取消</Button>
+            <Button 
+              onClick={handleFileDistribute} 
+              disabled={!selectedFile || !remoteDir || isUploading}
+              className="gap-2"
+            >
+              {isUploading ? "发送中..." : "开始分发"}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
