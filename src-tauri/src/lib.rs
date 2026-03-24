@@ -10,6 +10,7 @@ use std::net::TcpStream;
 use ssh2::Session;
 use std::io::prelude::*;
 use std::thread;
+use std::collections::HashMap;
 
 use std::sync::mpsc;
 use std::time::Duration;
@@ -44,9 +45,9 @@ pub struct AppConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ScriptParam {
+pub struct ScriptVar {
     pub name: String,
-    pub label: String,
+    pub required: bool,
     pub default_value: String,
 }
 
@@ -55,7 +56,7 @@ pub struct Script {
     pub id: String,
     pub name: String,
     pub command_template: String,
-    pub params: Vec<ScriptParam>,
+    pub vars: Vec<ScriptVar>,
 }
 
 pub struct SshSession {
@@ -65,6 +66,7 @@ pub struct SshSession {
 
 pub struct AppState {
     pub sessions: DashMap<String, SessionInfo>,
+    pub scripts: DashMap<String, Script>,
     pub config_path: PathBuf,
     pub ssh_sessions: DashMap<String, Arc<SshSession>>,
 }
@@ -73,7 +75,7 @@ impl AppState {
     fn save_to_disk(&self) {
         let config = AppConfig {
             sessions: self.sessions.iter().map(|kv| kv.value().clone()).collect(),
-            scripts: get_default_scripts(),
+            scripts: self.scripts.iter().map(|kv| kv.value().clone()).collect(),
         };
         let json = serde_json::to_string_pretty(&config).expect("Failed to serialize config");
         let _ = fs::write(&self.config_path, json);
@@ -252,16 +254,16 @@ fn get_default_scripts() -> Vec<Script> {
             id: "1".to_string(),
             name: "Update System".to_string(),
             command_template: "sudo apt update && sudo apt upgrade -y".to_string(),
-            params: vec![],
+            vars: vec![],
         },
         Script {
             id: "2".to_string(),
             name: "Install Package".to_string(),
-            command_template: "sudo apt install -y {{package_name}}".to_string(),
-            params: vec![
-                ScriptParam {
+            command_template: "sudo apt install -y $package_name".to_string(),
+            vars: vec![
+                ScriptVar {
                     name: "package_name".to_string(),
-                    label: "Package Name".to_string(),
+                    required: true,
                     default_value: "vim".to_string(),
                 }
             ],
@@ -342,16 +344,29 @@ fn authenticate_session(sess: &mut Session, session_info: &SessionInfo) -> Resul
     Err("Neither key path nor password provided".to_string())
 }
 
+fn set_unselected_to_idle(state: &AppState, window: &tauri::Window, selected_ids: &[String]) {
+    for mut entry in state.sessions.iter_mut() {
+        if !selected_ids.contains(entry.key()) {
+            if entry.status != SessionStatus::Idle {
+                entry.status = SessionStatus::Idle;
+                let _ = window.emit("session_updated", entry.value().clone());
+            }
+        }
+    }
+}
+
 #[tauri::command]
 async fn run_command_all(
     app_handle: AppHandle,
     command: String,
+    vars: Option<HashMap<String, String>>,
     window: tauri::Window,
     ids: Option<Vec<String>>,
 ) -> Result<(), String> {
     let state = app_handle.state::<AppState>();
-    let session_ids: Vec<String> = if let Some(ids) = ids {
-        ids
+    let session_ids: Vec<String> = if let Some(selected_ids) = ids {
+        set_unselected_to_idle(&state, &window, &selected_ids);
+        selected_ids
     } else {
         state.sessions.iter().map(|kv| kv.key().clone()).collect()
     };
@@ -360,6 +375,7 @@ async fn run_command_all(
         let app_clone = app_handle.clone();
         let id_clone = id.clone();
         let cmd_clone = command.clone();
+        let vars_clone = vars.clone();
         let window_clone = window.clone();
         
         tokio::spawn(async move {
@@ -381,7 +397,9 @@ async fn run_command_all(
             }
             
             // Actual SSH execution
-            let cmd_for_exec = cmd_clone.clone();
+            let cmd_for_thread = cmd_clone.clone();
+            let vars_for_thread = vars_clone.clone();
+            
             let result = thread::spawn(move || -> Result<String, String> {
                 let tcp = TcpStream::connect(format!("{}:{}", session_info.host, session_info.port))
                     .map_err(|e| e.to_string())?;
@@ -392,7 +410,25 @@ async fn run_command_all(
                 authenticate_session(&mut sess, &session_info)?;
 
                 let mut channel = sess.channel_session().map_err(|e| e.to_string())?;
-                channel.exec(&cmd_for_exec).map_err(|e| e.to_string())?;
+                
+                // Inject environment variables at the beginning
+                let final_command = if let Some(env_vars) = vars_for_thread {
+                    if env_vars.is_empty() {
+                        cmd_for_thread
+                    } else {
+                        let mut env_prefix = String::new();
+                        for (k, v) in env_vars {
+                            let escaped_v = v.replace("'", "'\\''");
+                            env_prefix.push_str(&format!("export {}='{}'\n", k, escaped_v));
+                        }
+                        // Add a blank line after exports
+                        format!("{}\n{}", env_prefix, cmd_for_thread)
+                    }
+                } else {
+                    cmd_for_thread
+                };
+
+                channel.exec(&final_command).map_err(|e| e.to_string())?;
                 
                 let mut output = String::new();
                 channel.read_to_string(&mut output).map_err(|e| e.to_string())?;
@@ -436,8 +472,9 @@ async fn distribute_file(
     ids: Option<Vec<String>>,
 ) -> Result<(), String> {
     let state = app_handle.state::<AppState>();
-    let session_ids: Vec<String> = if let Some(ids) = ids {
-        ids
+    let session_ids: Vec<String> = if let Some(selected_ids) = ids {
+        set_unselected_to_idle(&state, &window, &selected_ids);
+        selected_ids
     } else {
         state.sessions.iter().map(|kv| kv.key().clone()).collect()
     };
@@ -532,8 +569,9 @@ async fn distribute_file_data(
     ids: Option<Vec<String>>,
 ) -> Result<(), String> {
     let state = app_handle.state::<AppState>();
-    let session_ids: Vec<String> = if let Some(ids) = ids {
-        ids
+    let session_ids: Vec<String> = if let Some(selected_ids) = ids {
+        set_unselected_to_idle(&state, &window, &selected_ids);
+        selected_ids
     } else {
         state.sessions.iter().map(|kv| kv.key().clone()).collect()
     };
@@ -616,8 +654,28 @@ fn get_sessions(state: State<'_, AppState>) -> Vec<SessionInfo> {
 }
 
 #[tauri::command]
-fn get_scripts() -> Vec<Script> {
-    get_default_scripts()
+fn get_scripts(state: State<'_, AppState>) -> Vec<Script> {
+    let mut scripts: Vec<Script> = state.scripts.iter().map(|kv| kv.value().clone()).collect();
+    scripts.sort_by(|a, b| a.name.cmp(&b.name));
+    scripts
+}
+
+#[tauri::command]
+fn add_script(state: State<'_, AppState>, script: Script) -> Result<String, String> {
+    let mut script = script;
+    if script.id.is_empty() {
+        script.id = Uuid::new_v4().to_string();
+    }
+    state.scripts.insert(script.id.clone(), script.clone());
+    state.save_to_disk();
+    Ok(script.id)
+}
+
+#[tauri::command]
+fn delete_script(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    state.scripts.remove(&id);
+    state.save_to_disk();
+    Ok(())
 }
 
 #[tauri::command]
@@ -639,7 +697,8 @@ pub fn run() {
             }
             let config_path = app_dir.join("config.json");
             let sessions = DashMap::new();
-            
+            let scripts = DashMap::new();
+
             if config_path.exists() {
                 if let Ok(content) = fs::read_to_string(&config_path) {
                     if let Ok(config) = serde_json::from_str::<AppConfig>(&content) {
@@ -649,12 +708,22 @@ pub fn run() {
                             }
                             sessions.insert(s.id.clone(), s);
                         }
+                        for s in config.scripts {
+                            scripts.insert(s.id.clone(), s);
+                        }
                     }
+                }
+            }
+            
+            if scripts.is_empty() {
+                for s in get_default_scripts() {
+                    scripts.insert(s.id.clone(), s);
                 }
             }
 
             app.manage(AppState {
                 sessions,
+                scripts,
                 config_path,
                 ssh_sessions: DashMap::new(),
             });
@@ -669,6 +738,8 @@ pub fn run() {
             distribute_file_data,
             get_sessions,
             get_scripts,
+            add_script,
+            delete_script,
             delete_session,
             start_ssh_session,
             send_ssh_data,

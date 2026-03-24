@@ -15,12 +15,17 @@ export default function SSHTerminal({ sessionId, isVisible = true }: Props) {
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
 
+  const isVisibleRef = useRef(isVisible);
+  useEffect(() => {
+    isVisibleRef.current = isVisible;
+  }, [isVisible]);
+
   useEffect(() => {
     if (isVisible && fitAddonRef.current) {
       // Small delay to ensure DOM is updated and has dimensions
       setTimeout(() => {
-        fitAddonRef.current?.fit();
-        if (xtermRef.current) {
+        if (fitAddonRef.current && xtermRef.current) {
+          fitAddonRef.current.fit();
           xtermRef.current.focus();
           invoke('resize_ssh_session', { 
             sessionId, 
@@ -68,28 +73,34 @@ export default function SSHTerminal({ sessionId, isVisible = true }: Props) {
     term.loadAddon(fitAddon);
     term.open(terminalRef.current);
     
-    // Small delay to ensure container is rendered
-    setTimeout(() => {
-      fitAddon.fit();
-    }, 10);
-
     xtermRef.current = term;
     fitAddonRef.current = fitAddon;
 
-    // Start SSH session
-    const startSession = async () => {
-      try {
-        await invoke('start_ssh_session', { 
-          sessionId, 
-          rows: term.rows, 
-          cols: term.cols 
-        });
-      } catch (err) {
-        term.write(`\r\n\x1b[31mError: ${err}\x1b[0m\r\n`);
+    // Use ResizeObserver for more reliable sizing
+    const resizeObserver = new ResizeObserver(() => {
+      if (isVisibleRef.current) {
+        fitAddon.fit();
       }
-    };
+    });
+    resizeObserver.observe(terminalRef.current);
 
-    startSession();
+    // Initial fit after a short delay to ensure container is fully laid out
+    const initialFitTimeout = setTimeout(() => {
+      fitAddon.fit();
+      // Start SSH session AFTER first fit
+      const startSession = async () => {
+        try {
+          await invoke('start_ssh_session', { 
+            sessionId, 
+            rows: term.rows, 
+            cols: term.cols 
+          });
+        } catch (err) {
+          term.write(`\r\n\x1b[31mError: ${err}\x1b[0m\r\n`);
+        }
+      };
+      startSession();
+    }, 50);
 
     // Handlers
     const unlistenData = listen<string>(`ssh_data_${sessionId}`, (event) => {
@@ -104,19 +115,17 @@ export default function SSHTerminal({ sessionId, isVisible = true }: Props) {
       invoke('send_ssh_data', { sessionId, data });
     });
 
-    const handleResize = () => {
-      fitAddon.fit();
+    term.onResize((size) => {
       invoke('resize_ssh_session', { 
         sessionId, 
-        rows: term.rows, 
-        cols: term.cols 
+        rows: size.rows, 
+        cols: size.cols 
       });
-    };
-
-    window.addEventListener('resize', handleResize);
+    });
 
     return () => {
-      window.removeEventListener('resize', handleResize);
+      resizeObserver.disconnect();
+      clearTimeout(initialFitTimeout);
       unlistenData.then(f => f());
       unlistenClosed.then(f => f());
       term.dispose();

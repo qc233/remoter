@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Plus, Settings, Terminal as TerminalIcon, Users, Trash2, ChevronLeft, Play, ChevronDown, ChevronRight, GripVertical, Check, Minus, Upload, FileText } from "lucide-react";
+import { Plus, Settings, Terminal as TerminalIcon, Users, Trash2, ChevronLeft, Play, ChevronDown, ChevronRight, GripVertical, Check, Minus, Upload, FileText, Search } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from "@/components/ui/card";
@@ -27,11 +27,17 @@ interface SessionInfo {
   history: string[];
 }
 
+interface ScriptVar {
+  name: string;
+  required: boolean;
+  default_value: string;
+}
+
 interface Script {
   id: string;
   name: string;
   command_template: string;
-  params: { name: string; label: string; default_value: string }[];
+  vars: ScriptVar[];
 }
 
 type Page = 'single' | 'multi' | 'settings';
@@ -58,10 +64,15 @@ function App() {
   
   const [tabs, setTabs] = useState<Tab[]>([{ id: 'default', sessionId: null }]);
   const [activeTabIndex, setActiveTabIndex] = useState(0);
+  const [searchTerm, setSearchTerm] = useState("");
 
   const [showAddModal, setShowAddModal] = useState(false);
   const [showBatchAddModal, setShowBatchAddModal] = useState(false);
   const [selectedScript, setSelectedScript] = useState<Script | null>(null);
+
+  const [showManageScriptsModal, setShowManageScriptsModal] = useState(false);
+  const [showEditScriptModal, setShowEditScriptModal] = useState(false);
+  const [editingScript, setEditingScript] = useState<Script>({ id: "", name: "", command_template: "", vars: [] });
 
   const [newSession, setNewSession] = useState<Partial<SessionInfo>>({ port: 22, group: "默认" });
   const [batchData, setBatchData] = useState({
@@ -135,6 +146,16 @@ function App() {
       setIsUploading(false);
     }
   };
+
+  const filteredSessions = useMemo(() => {
+    const term = searchTerm.toLowerCase().trim();
+    if (!term) return sessions;
+    return sessions.filter(s => 
+      (s.name && s.name.toLowerCase().includes(term)) ||
+      (s.host && s.host.toLowerCase().includes(term)) ||
+      (s.user && s.user.toLowerCase().includes(term))
+    );
+  }, [sessions, searchTerm]);
 
   const groupedSessions = useMemo(() => {
     const groups: Record<string, SessionInfo[]> = {};
@@ -232,10 +253,42 @@ function App() {
   };
 
   const runScript = async (script: Script, params: Record<string, string>) => {
-    let command = script.command_template;
-    Object.entries(params).forEach(([k, v]) => command = command.replace(`{{${k}}}`, v));
-    const ids = activePage === 'multi' ? Array.from(selectedSessionIds) : null;
-    await invoke("run_command_all", { command, ids });
+    const command = script.command_template;
+    
+    if (activePage === 'single') {
+      const activeTab = tabs[activeTabIndex];
+      if (activeTab && activeTab.sessionId) {
+        let finalCommand = command;
+        const envEntries = Object.entries(params);
+        
+        if (envEntries.length > 0) {
+          const envPrefix = envEntries
+            .map(([k, v]) => `export ${k}='${v.replace(/'/g, "'\\''")}'`)
+            .join('\n');
+          
+          finalCommand = `${envPrefix}\n\n${command}`;
+        }
+        
+        // Ensure it ends with a newline to trigger execution
+        if (!finalCommand.endsWith('\n')) {
+          finalCommand += '\n';
+        }
+        
+        await invoke("send_ssh_data", { sessionId: activeTab.sessionId, data: finalCommand });
+        setSelectedScript(null);
+        return;
+      }
+    }
+    
+    // For multi page or if no active tab in single mode (fallback/safety)
+    let ids: string[] = [];
+    if (activePage === 'multi') {
+      ids = Array.from(selectedSessionIds);
+    }
+    
+    if (ids.length > 0) {
+      await invoke("run_command_all", { command, vars: params, ids });
+    }
     setSelectedScript(null);
   };
 
@@ -255,6 +308,19 @@ function App() {
       await invoke("update_session_group", { id: sessionId, group: targetGroup });
       refreshSessions();
     }
+  };
+
+  const handleSaveScript = async () => {
+    await invoke("add_script", { script: editingScript });
+    setShowEditScriptModal(false);
+    const updatedScripts = await invoke<Script[]>("get_scripts");
+    setScripts(updatedScripts);
+  };
+
+  const handleDeleteScript = async (id: string) => {
+    await invoke("delete_script", { id });
+    const updatedScripts = await invoke<Script[]>("get_scripts");
+    setScripts(updatedScripts);
   };
 
   const handleCreateGroup = async (nameOverride?: string) => {
@@ -291,14 +357,14 @@ function App() {
               className="justify-start gap-2" 
               onClick={() => setActivePage('single')}
             >
-              <TerminalIcon size={16} /> SSH 一对一
+              <TerminalIcon size={16} /> SSH
             </Button>
             <Button 
               variant={activePage === 'multi' ? 'secondary' : 'ghost'} 
               className="justify-start gap-2" 
               onClick={() => setActivePage('multi')}
             >
-              <Users size={16} /> SSH 一对多
+              <Users size={16} /> FORK
             </Button>
             <div className="mt-auto">
               <Button 
@@ -322,10 +388,6 @@ function App() {
               <Button variant="outline" size="sm" className="gap-2" onClick={() => setShowBatchAddModal(true)}>
                 <Users size={14} /> 批量添加
               </Button>
-            </div>
-            <div className="flex items-center gap-3">
-              <div className="w-8 h-8 rounded-full bg-muted flex items-center justify-center text-xs font-medium">AD</div>
-              <span className="text-sm font-medium">Admin</span>
             </div>
           </header>
 
@@ -374,12 +436,6 @@ function App() {
                     <div className="flex-1 flex flex-col min-h-0 bg-black/5 rounded-xl border border-border p-4 shadow-inner">
                         {sessions.filter(s => s.id === tab.sessionId).map(s => (
                         <div key={s.id} className="flex-1 flex flex-col min-h-0">
-                            <div className="flex items-center justify-between mb-4">
-                            <h2 className="text-xl font-bold">{s.name || s.host}</h2>
-                            <Button variant="outline" size="sm" onClick={() => selectSession(null)} className="gap-2">
-                                <ChevronLeft size={14} /> 返回列表
-                            </Button>
-                            </div>
                             <div className="flex-1 relative rounded-lg overflow-hidden border border-white/10 shadow-2xl bg-black">
                                 <SSHTerminal sessionId={s.id} isVisible={activeTabIndex === idx && activePage === 'single'} />
                             </div>
@@ -387,27 +443,43 @@ function App() {
                         ))}
                     </div>
                     ) : (
-                    <div className="h-full overflow-auto">
-                        <h2 className="text-2xl font-bold mb-6">主机列表</h2>
-                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                        {sessions.map(s => (
-                            <Card key={s.id} className="hover:shadow-lg transition-all cursor-pointer group bg-card/60" onClick={() => selectSession(s.id)}>
-                            <CardHeader className="pb-2">
-                                <div className="flex justify-between items-start">
-                                <CardTitle className="text-lg">{s.name || s.host}</CardTitle>
-                                <Button 
-                                    variant="ghost" 
-                                    size="icon" 
-                                    className="h-8 w-8 text-destructive opacity-0 group-hover:opacity-100 transition-opacity" 
-                                    onClick={(e) => { e.stopPropagation(); handleDelete(s.id); }}
-                                >
-                                    <Trash2 size={14} />
-                                </Button>
-                                </div>
-                                <CardDescription className="font-mono text-xs">{s.user}@{s.host}</CardDescription>
-                            </CardHeader>
-                            </Card>
-                        ))}
+                    <div className="h-full flex flex-col">
+                        <div className="relative mb-6">
+                          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" size={16} />
+                          <Input 
+                            placeholder="搜索主机名、IP 或用户名..." 
+                            className="pl-10 h-11 bg-card/40 border-border/50 focus:ring-primary/20"
+                            value={searchTerm}
+                            onChange={e => setSearchTerm(e.target.value)}
+                          />
+                        </div>
+                        <div className="flex-1 overflow-auto pr-2">
+                          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 pb-6">
+                            {filteredSessions.map(s => (
+                                <Card key={s.id} className="hover:shadow-lg transition-all cursor-pointer group bg-card/60" onClick={() => selectSession(s.id)}>
+                                <CardHeader className="pb-2">
+                                    <div className="flex justify-between items-start">
+                                    <CardTitle className="text-lg">{s.name || s.host}</CardTitle>
+                                    <Button 
+                                        variant="ghost" 
+                                        size="icon" 
+                                        className="h-8 w-8 text-destructive opacity-0 group-hover:opacity-100 transition-opacity" 
+                                        onClick={(e) => { e.stopPropagation(); handleDelete(s.id); }}
+                                    >
+                                        <Trash2 size={14} />
+                                    </Button>
+                                    </div>
+                                    <CardDescription className="font-mono text-xs">{s.user}@{s.host}</CardDescription>
+                                </CardHeader>
+                                </Card>
+                            ))}
+                            {filteredSessions.length === 0 && (
+                              <div className="col-span-full flex flex-col items-center justify-center py-12 text-muted-foreground">
+                                <Search size={48} className="mb-4 opacity-20" />
+                                <p>未找到匹配的主机</p>
+                              </div>
+                            )}
+                          </div>
                         </div>
                     </div>
                     )}
@@ -423,7 +495,6 @@ function App() {
               activePage === 'multi' ? "opacity-100 z-10" : "opacity-0 z-0 pointer-events-none"
             )}
           >
-            <h2 className="text-2xl font-bold mb-6">SSH 一对多同步</h2>
             <Card className="mb-8 bg-card/60 backdrop-blur-sm">
                 <CardContent className="pt-6">
                 <div className="flex flex-col gap-4">
@@ -436,7 +507,7 @@ function App() {
                     />
                     <div className="flex gap-2">
                       <Button 
-                        onClick={() => { invoke("run_command_all", { command: broadcastCmd, ids: Array.from(selectedSessionIds) }); setBroadcastCmd(""); }} 
+                        onClick={() => { invoke("run_command_all", { command: broadcastCmd, vars: null, ids: Array.from(selectedSessionIds) }); setBroadcastCmd(""); }} 
                         className="gap-2 flex-1" 
                         disabled={selectedSessionIds.size === 0 || !broadcastCmd.trim()}
                       >
@@ -595,27 +666,47 @@ function App() {
       {/* Right Script Sidebar */}
       {activePage !== 'settings' && (
         <aside className="w-64 border-l border-border bg-card/40 backdrop-blur-md flex flex-col p-4 gap-4">
-          <h3 className="font-semibold px-2 mb-2">快捷脚本</h3>
-          <div className="flex flex-col gap-2">
+          <div className="flex items-center justify-between px-2 mb-2">
+            <h3 className="font-semibold">快捷脚本</h3>
+            <Button 
+              variant="ghost" 
+              size="icon" 
+              className="h-6 w-6"
+              onClick={() => setShowManageScriptsModal(true)}
+            >
+              <Settings size={14} />
+            </Button>
+          </div>
+          <div className="flex flex-col gap-2 overflow-y-auto">
             {scripts.map(script => (
               <Button 
                 key={script.id} 
                 variant="outline" 
                 className="justify-start h-auto py-3 px-4 text-left font-normal bg-card/50 hover:bg-card transition-colors"
                 onClick={() => {
-                  if (script.params.length > 0) {
+                  if (script.vars.length > 0) {
                     const defaults: Record<string, string> = {}; 
-                    script.params.forEach(p => defaults[p.name] = p.default_value);
+                    script.vars.forEach(v => defaults[v.name] = v.default_value);
                     setScriptParams(defaults); setSelectedScript(script);
                   } else { runScript(script, {}); }
                 }}
               >
-                <div className="flex flex-col gap-0.5">
-                  <span className="text-sm font-medium">{script.name}</span>
+                <div className="flex flex-col gap-0.5 w-full overflow-hidden">
+                  <span className="text-sm font-medium truncate">{script.name}</span>
                   <span className="text-[10px] text-muted-foreground truncate opacity-70 font-mono">{script.command_template}</span>
                 </div>
               </Button>
             ))}
+            <Button 
+              variant="ghost" 
+              className="mt-2 border border-dashed border-border"
+              onClick={() => {
+                setEditingScript({ id: "", name: "", command_template: "", vars: [] });
+                setShowEditScriptModal(true);
+              }}
+            >
+              <Plus size={14} className="mr-2" /> 新建脚本
+            </Button>
           </div>
         </aside>
       )}
@@ -737,24 +828,204 @@ function App() {
         </DialogContent>
       </Dialog>
 
-      {/* Script Modal */}
+      {/* Script Modal (Running) */}
       <Dialog open={!!selectedScript} onOpenChange={(open) => !open && setSelectedScript(null)}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>{selectedScript?.name}</DialogTitle>
             <DialogDescription>配置脚本参数并执行。</DialogDescription>
           </DialogHeader>
-          <div className="grid gap-4 py-4">
-            {selectedScript?.params.map(p => (
-              <div key={p.name} className="grid gap-2">
-                <label className="text-sm font-medium">{p.label}</label>
-                <Input value={scriptParams[p.name]} onChange={e => setScriptParams({ ...scriptParams, [p.name]: e.target.value })} />
+          <div className="grid gap-4 py-4 max-h-[60vh] overflow-y-auto px-1">
+            {selectedScript?.vars.map(v => (
+              <div key={v.name} className="grid gap-2">
+                <label className="text-sm font-medium">
+                  {v.name} {v.required && <span className="text-destructive">*</span>}
+                </label>
+                <Input 
+                  value={scriptParams[v.name] || ""} 
+                  onChange={e => setScriptParams({ ...scriptParams, [v.name]: e.target.value })} 
+                  placeholder={v.default_value}
+                />
               </div>
             ))}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setSelectedScript(null)}>取消</Button>
-            <Button onClick={() => selectedScript && runScript(selectedScript, scriptParams)}>执行</Button>
+            <Button 
+              onClick={() => selectedScript && runScript(selectedScript, scriptParams)}
+              disabled={selectedScript?.vars.some(v => v.required && !scriptParams[v.name] && !v.default_value)}
+            >
+              执行
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Manage Scripts Modal */}
+      <Dialog open={showManageScriptsModal} onOpenChange={setShowManageScriptsModal}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>管理快捷脚本</DialogTitle>
+            <DialogDescription>管理您的快捷脚本，您可以编辑或删除现有的脚本。</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-2 py-4 max-h-[60vh] overflow-y-auto">
+            {scripts.map(s => (
+              <div key={s.id} className="flex items-center justify-between p-3 border border-border rounded-lg bg-card/40">
+                <div className="flex flex-col overflow-hidden mr-4">
+                  <span className="font-medium truncate">{s.name}</span>
+                  <span className="text-xs text-muted-foreground truncate font-mono opacity-60">{s.command_template}</span>
+                </div>
+                <div className="flex items-center gap-1 shrink-0">
+                  <Button 
+                    variant="ghost" 
+                    size="icon" 
+                    className="h-8 w-8"
+                    onClick={() => {
+                      setEditingScript(JSON.parse(JSON.stringify(s)));
+                      setShowEditScriptModal(true);
+                    }}
+                  >
+                    <Settings size={14} />
+                  </Button>
+                  <Button 
+                    variant="ghost" 
+                    size="icon" 
+                    className="h-8 w-8 text-destructive"
+                    onClick={() => handleDeleteScript(s.id)}
+                  >
+                    <Trash2 size={14} />
+                  </Button>
+                </div>
+              </div>
+            ))}
+            {scripts.length === 0 && (
+              <div className="text-center py-8 text-muted-foreground">暂无脚本</div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowManageScriptsModal(false)}>关闭</Button>
+            <Button onClick={() => {
+              setEditingScript({ id: "", name: "", command_template: "", vars: [] });
+              setShowEditScriptModal(true);
+            }}>
+              <Plus size={14} className="mr-2" /> 新建脚本
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Edit Script Modal */}
+      <Dialog open={showEditScriptModal} onOpenChange={setShowEditScriptModal}>
+        <DialogContent className="max-w-3xl max-h-[90vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle>{editingScript.id ? "编辑脚本" : "新建脚本"}</DialogTitle>
+          </DialogHeader>
+          <div className="flex-1 overflow-y-auto py-4 space-y-6 pr-1">
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">脚本名称</label>
+              <Input 
+                value={editingScript.name} 
+                onChange={e => setEditingScript({ ...editingScript, name: e.target.value })} 
+                placeholder="例如: 重启 Nginx"
+              />
+            </div>
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">脚本内容</label>
+              <Textarea 
+                value={editingScript.command_template} 
+                onChange={e => setEditingScript({ ...editingScript, command_template: e.target.value })} 
+                placeholder="sudo systemctl restart nginx"
+                className="font-mono min-h-[120px]"
+              />
+            </div>
+            
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <label className="text-sm font-medium">环境变量</label>
+                <Button 
+                  variant="outline" 
+                  size="sm" 
+                  className="h-8 gap-1"
+                  onClick={() => {
+                    const newVars = [...editingScript.vars, { name: "", required: false, default_value: "" }];
+                    setEditingScript({ ...editingScript, vars: newVars });
+                  }}
+                >
+                  <Plus size={14} /> 添加变量
+                </Button>
+              </div>
+              
+              <div className="space-y-3">
+                {editingScript.vars.map((v, i) => (
+                  <div key={i} className="flex items-end gap-3 p-3 border border-border/50 rounded-lg bg-muted/20 relative group">
+                    <div className="flex-1 grid gap-2">
+                      <label className="text-[10px] uppercase tracking-wider font-semibold text-muted-foreground">变量名</label>
+                      <Input 
+                        value={v.name} 
+                        onChange={e => {
+                          const newVars = [...editingScript.vars];
+                          newVars[i].name = e.target.value;
+                          setEditingScript({ ...editingScript, vars: newVars });
+                        }} 
+                        placeholder="VAR_NAME"
+                        className="h-8 text-sm"
+                      />
+                    </div>
+                    <div className="flex-1 grid gap-2">
+                      <label className="text-[10px] uppercase tracking-wider font-semibold text-muted-foreground">默认值</label>
+                      <Input 
+                        value={v.default_value} 
+                        onChange={e => {
+                          const newVars = [...editingScript.vars];
+                          newVars[i].default_value = e.target.value;
+                          setEditingScript({ ...editingScript, vars: newVars });
+                        }} 
+                        placeholder="默认值"
+                        className="h-8 text-sm"
+                      />
+                    </div>
+                    <div className="flex flex-col gap-2 items-center pb-1 px-2">
+                      <label className="text-[10px] uppercase tracking-wider font-semibold text-muted-foreground">必填</label>
+                      <input 
+                        type="checkbox" 
+                        checked={v.required} 
+                        onChange={e => {
+                          const newVars = [...editingScript.vars];
+                          newVars[i].required = e.target.checked;
+                          setEditingScript({ ...editingScript, vars: newVars });
+                        }}
+                        className="w-4 h-4 rounded border-2 cursor-pointer transition-all"
+                      />
+                    </div>
+                    <Button 
+                      variant="ghost" 
+                      size="icon" 
+                      className="h-8 w-8 text-destructive hover:bg-destructive/10"
+                      onClick={() => {
+                        const newVars = editingScript.vars.filter((_, idx) => idx !== i);
+                        setEditingScript({ ...editingScript, vars: newVars });
+                      }}
+                    >
+                      <Trash2 size={14} />
+                    </Button>
+                  </div>
+                ))}
+                {editingScript.vars.length === 0 && (
+                  <div className="text-center py-4 text-xs text-muted-foreground border border-dashed border-border rounded-lg">
+                    未添加环境变量
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+          <DialogFooter className="pt-4 border-t border-border mt-auto">
+            <Button variant="outline" onClick={() => setShowEditScriptModal(false)}>取消</Button>
+            <Button 
+              onClick={handleSaveScript}
+              disabled={!editingScript.name || !editingScript.command_template}
+            >
+              保存脚本
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
