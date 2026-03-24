@@ -49,4 +49,4 @@ jobs:
           releaseBody: "See the assets below for the latest version."
           releaseDraft: true
           prerelease: false
-          args: ${{ matrix.platform == 'ubuntu-22.04' && '--bundle appimage,deb' || '' }}
+          args: ${{ matrix.platform == 'ubuntu-22.04' && '--bundles appimage,deb' || '' }}

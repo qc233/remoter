@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Plus, Settings, Terminal as TerminalIcon, Users, Trash2, ChevronLeft, Play, ChevronDown, ChevronRight, GripVertical, Check, Minus, Upload, FileText, Search } from "lucide-react";
+import { Plus, Settings, Terminal as TerminalIcon, Users, Trash2, Play, ChevronDown, ChevronRight, GripVertical, Check, Minus, Upload, FileText, Search, Edit } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from "@/components/ui/card";
@@ -67,6 +67,7 @@ function App() {
   const [searchTerm, setSearchTerm] = useState("");
 
   const [showAddModal, setShowAddModal] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
   const [showBatchAddModal, setShowBatchAddModal] = useState(false);
   const [selectedScript, setSelectedScript] = useState<Script | null>(null);
 
@@ -224,9 +225,24 @@ function App() {
     setCollapsedGroups(next);
   };
 
+  const startEdit = (e: React.MouseEvent, session: SessionInfo) => {
+    e.stopPropagation();
+    setNewSession(session);
+    setIsEditing(true);
+    setShowAddModal(true);
+  };
+
   const handleAddSession = async () => {
-    await invoke("add_session", { session: { ...newSession, id: "", status: "Idle", history: [] } });
+    await invoke("add_session", { 
+      session: { 
+        ...newSession, 
+        id: isEditing ? newSession.id : "", 
+        status: isEditing ? (newSession.status || "Idle") : "Idle", 
+        history: isEditing ? (newSession.history || []) : [] 
+      } 
+    });
     setShowAddModal(false);
+    setIsEditing(false);
     setNewSession({ port: 22, group: "默认" });
     refreshSessions();
   };
@@ -460,14 +476,24 @@ function App() {
                                 <CardHeader className="pb-2">
                                     <div className="flex justify-between items-start">
                                     <CardTitle className="text-lg">{s.name || s.host}</CardTitle>
-                                    <Button 
-                                        variant="ghost" 
-                                        size="icon" 
-                                        className="h-8 w-8 text-destructive opacity-0 group-hover:opacity-100 transition-opacity" 
-                                        onClick={(e) => { e.stopPropagation(); handleDelete(s.id); }}
-                                    >
-                                        <Trash2 size={14} />
-                                    </Button>
+                                    <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                      <Button 
+                                          variant="ghost" 
+                                          size="icon" 
+                                          className="h-8 w-8 text-muted-foreground hover:text-primary" 
+                                          onClick={(e) => startEdit(e, s)}
+                                      >
+                                          <Edit size={14} />
+                                      </Button>
+                                      <Button 
+                                          variant="ghost" 
+                                          size="icon" 
+                                          className="h-8 w-8 text-destructive" 
+                                          onClick={(e) => { e.stopPropagation(); handleDelete(s.id); }}
+                                      >
+                                          <Trash2 size={14} />
+                                      </Button>
+                                    </div>
                                     </div>
                                     <CardDescription className="font-mono text-xs">{s.user}@{s.host}</CardDescription>
                                 </CardHeader>
@@ -585,7 +611,15 @@ function App() {
                             <div className="absolute top-3 left-3 opacity-0 group-hover/card:opacity-40 cursor-grab active:cursor-grabbing">
                                 <GripVertical size={14} />
                             </div>
-                            <div className="absolute top-3 right-3 z-20" onClick={(e) => e.stopPropagation()}>
+                            <div className="absolute top-3 right-3 z-20 flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                              <Button 
+                                variant="ghost" 
+                                size="icon" 
+                                className="h-6 w-6 text-muted-foreground hover:text-primary opacity-0 group-hover/card:opacity-100 transition-opacity" 
+                                onClick={(e) => startEdit(e, s)}
+                              >
+                                <Edit size={12} />
+                              </Button>
                               <div className="relative flex items-center justify-center w-4 h-4">
                                 <input 
                                   type="checkbox" 
@@ -682,7 +716,7 @@ function App() {
               <Button 
                 key={script.id} 
                 variant="outline" 
-                className="justify-start h-auto py-3 px-4 text-left font-normal bg-card/50 hover:bg-card transition-colors"
+                className="justify-start h-auto py-3 px-4 text-left font-normal bg-card/40 hover:bg-accent/10 hover:border-primary transition-all duration-200 group active:scale-[0.98]"
                 onClick={() => {
                   if (script.vars.length > 0) {
                     const defaults: Record<string, string> = {}; 
@@ -691,9 +725,9 @@ function App() {
                   } else { runScript(script, {}); }
                 }}
               >
-                <div className="flex flex-col gap-0.5 w-full overflow-hidden">
-                  <span className="text-sm font-medium truncate">{script.name}</span>
-                  <span className="text-[10px] text-muted-foreground truncate opacity-70 font-mono">{script.command_template}</span>
+                <div className="flex flex-col gap-0.5 w-full overflow-hidden min-w-0 flex-1">
+                  <span className="text-sm font-medium truncate group-hover:text-primary transition-colors">{script.name}</span>
+                  <span className="text-[10px] text-muted-foreground truncate opacity-70 font-mono group-hover:opacity-100 transition-opacity">{script.command_template}</span>
                 </div>
               </Button>
             ))}
@@ -713,44 +747,54 @@ function App() {
 
       </div>
 
-      {/* Add Modal */}
-      <Dialog open={showAddModal} onOpenChange={setShowAddModal}>
+      {/* Add/Edit Modal */}
+      <Dialog open={showAddModal} onOpenChange={(open) => {
+        setShowAddModal(open);
+        if (!open) {
+          setIsEditing(false);
+          setNewSession({ port: 22, group: "默认" });
+        }
+      }}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>添加主机</DialogTitle>
-            <DialogDescription>输入远程主机的连接详情。</DialogDescription>
+            <DialogTitle>{isEditing ? "编辑主机" : "添加主机"}</DialogTitle>
+            <DialogDescription>{isEditing ? "修改远程主机的连接详情。" : "输入远程主机的连接详情。"}</DialogDescription>
           </DialogHeader>
           <div className="grid gap-4 py-4">
             <div className="grid gap-2">
               <label className="text-sm font-medium">名称</label>
-              <Input placeholder="My Server" onChange={e => setNewSession({ ...newSession, name: e.target.value })} />
+              <Input value={newSession.name || ""} placeholder="My Server" onChange={e => setNewSession({ ...newSession, name: e.target.value })} />
             </div>
             <div className="grid gap-2">
               <label className="text-sm font-medium">主机/IP</label>
-              <Input placeholder="1.2.3.4" onChange={e => setNewSession({ ...newSession, host: e.target.value })} />
+              <Input value={newSession.host || ""} placeholder="1.2.3.4" onChange={e => setNewSession({ ...newSession, host: e.target.value })} />
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div className="grid gap-2">
                 <label className="text-sm font-medium">用户名</label>
-                <Input onChange={e => setNewSession({ ...newSession, user: e.target.value })} />
+                <Input value={newSession.user || ""} onChange={e => setNewSession({ ...newSession, user: e.target.value })} />
               </div>
               <div className="grid gap-2">
                 <label className="text-sm font-medium">密码</label>
-                <Input type="password" onChange={e => setNewSession({ ...newSession, password: e.target.value })} />
+                <Input value={newSession.password || ""} type="password" onChange={e => setNewSession({ ...newSession, password: e.target.value })} />
               </div>
             </div>
             <div className="grid gap-2">
               <label className="text-sm font-medium">分组</label>
-              <Input value={newSession.group} placeholder="默认" onChange={e => setNewSession({ ...newSession, group: e.target.value })} />
+              <Input value={newSession.group || "默认"} placeholder="默认" onChange={e => setNewSession({ ...newSession, group: e.target.value })} />
             </div>
             <div className="grid gap-2">
               <label className="text-sm font-medium">密钥路径 (可选)</label>
-              <Input placeholder="/home/user/.ssh/id_rsa" onChange={e => setNewSession({ ...newSession, key_path: e.target.value })} />
+              <Input value={newSession.key_path || ""} placeholder="/home/user/.ssh/id_rsa" onChange={e => setNewSession({ ...newSession, key_path: e.target.value })} />
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setShowAddModal(false)}>取消</Button>
-            <Button onClick={handleAddSession}>添加</Button>
+            <Button variant="outline" onClick={() => {
+              setShowAddModal(false);
+              setIsEditing(false);
+              setNewSession({ port: 22, group: "默认" });
+            }}>取消</Button>
+            <Button onClick={handleAddSession}>{isEditing ? "保存修改" : "添加"}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -868,10 +912,10 @@ function App() {
             <DialogTitle>管理快捷脚本</DialogTitle>
             <DialogDescription>管理您的快捷脚本，您可以编辑或删除现有的脚本。</DialogDescription>
           </DialogHeader>
-          <div className="grid gap-2 py-4 max-h-[60vh] overflow-y-auto">
+          <div className="grid gap-2 py-4 max-h-[60vh] overflow-y-auto overflow-x-hidden w-full">
             {scripts.map(s => (
-              <div key={s.id} className="flex items-center justify-between p-3 border border-border rounded-lg bg-card/40">
-                <div className="flex flex-col overflow-hidden mr-4">
+              <div key={s.id} className="flex items-center justify-between p-3 border border-border rounded-lg bg-card/40 w-full min-w-0">
+                <div className="flex flex-col overflow-hidden mr-4 flex-1 min-w-0">
                   <span className="font-medium truncate">{s.name}</span>
                   <span className="text-xs text-muted-foreground truncate font-mono opacity-60">{s.command_template}</span>
                 </div>
