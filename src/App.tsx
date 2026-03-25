@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Plus, Settings, Terminal as TerminalIcon, Users, Trash2, Play, ChevronDown, ChevronRight, GripVertical, Check, Minus, Upload, FileText, Search, Edit } from "lucide-react";
@@ -65,6 +65,7 @@ function App() {
   const [tabs, setTabs] = useState<Tab[]>([{ id: 'default', sessionId: null }]);
   const [activeTabIndex, setActiveTabIndex] = useState(0);
   const [searchTerm, setSearchTerm] = useState("");
+  const [multiSearchTerm, setMultiSearchTerm] = useState("");
 
   const [showAddModal, setShowAddModal] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
@@ -160,13 +161,23 @@ function App() {
 
   const groupedSessions = useMemo(() => {
     const groups: Record<string, SessionInfo[]> = {};
+    const term = multiSearchTerm.toLowerCase().trim();
+    
     sessions.forEach(s => {
-      const g = s.group || "默认";
-      if (!groups[g]) groups[g] = [];
-      groups[g].push(s);
+      const isMatch = !term || (
+        (s.name && s.name.toLowerCase().includes(term)) ||
+        (s.host && s.host.toLowerCase().includes(term)) ||
+        (s.user && s.user.toLowerCase().includes(term))
+      );
+      
+      if (isMatch) {
+        const g = s.group || "默认";
+        if (!groups[g]) groups[g] = [];
+        groups[g].push(s);
+      }
     });
     return groups;
-  }, [sessions]);
+  }, [sessions, multiSearchTerm]);
 
   const addTab = () => {
     const newTab = { id: Date.now().toString(), sessionId: null };
@@ -553,7 +564,23 @@ function App() {
                 </CardContent>
             </Card>
             
+            <div className="relative mb-6">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" size={16} />
+              <Input 
+                placeholder="搜索主机名、IP 或用户名..." 
+                className="pl-10 h-11 bg-card/40 border-border/50 focus:ring-primary/20"
+                value={multiSearchTerm}
+                onChange={e => setMultiSearchTerm(e.target.value)}
+              />
+            </div>
+            
             <div className="flex flex-col gap-8">
+              {Object.entries(groupedSessions).length === 0 && multiSearchTerm && (
+                <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
+                  <Search size={48} className="mb-4 opacity-20" />
+                  <p>未找到匹配的主机</p>
+                </div>
+              )}
               {Object.entries(groupedSessions).map(([groupName, groupSessions]) => (
                 <div 
                   key={groupName} 
