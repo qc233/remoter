@@ -6,7 +6,8 @@ on:
       - "v*"
 
 jobs:
-  publish:
+  # 阶段一：并行编译并上传构建产物
+  build:
     permissions:
       contents: write
     strategy:
@@ -15,6 +16,8 @@ jobs:
         platform: [macos-latest, ubuntu-22.04, windows-latest]
 
     runs-on: ${{ matrix.platform }}
+    outputs:
+      release_id: ${{ steps.create-release.outputs.release_id }}
     steps:
       - uses: actions/checkout@v4
 
@@ -40,16 +43,18 @@ jobs:
       - name: install frontend dependencies
         run: pnpm install
 
-      - name: build frontend
-        run: pnpm build
-
+      # 使用 tauri-action 进行编译，但不让它在这里直接创建 Release
+      # 我们利用它的上传功能或者后续统一发布
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: v__VERSION__ # the action will replace this with the version from package.json
-          releaseName: "remoter v__VERSION__"
+          # 核心改进：由于你是按 Tag 触发，直接使用当前的 Tag 名
+          tagName: ${{ github.ref_name }}
+          releaseName: "remoter ${{ github.ref_name }}"
           releaseBody: "See the assets below for the latest version."
           releaseDraft: true
           prerelease: false
+          # 关键：允许在 Release 已存在时仅上传附件
+          allowUpsertDestructiveReleases: true 
           args: ${{ matrix.platform == 'ubuntu-22.04' && '--bundles appimage,deb' || '' }}
