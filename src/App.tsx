@@ -714,10 +714,10 @@ function App() {
             <Card className="bg-card/60">
                 <CardHeader>
                 <CardTitle>持久化存储</CardTitle>
-                <CardDescription>所有数据保存在本地应用目录中的 config.json 文件中 (明文)。</CardDescription>
+                <CardDescription>所有数据保存在 ~/.config/remoter/config.json 文件中 (明文)。</CardDescription>
                 </CardHeader>
                 <CardFooter>
-                <Button variant="outline" onClick={() => invoke("save_to_disk")}>强制保存</Button>
+                <Button variant="outline" onClick={() => invoke("manual_save_to_disk")}>强制保存</Button>
                 </CardFooter>
             </Card>
           </div>

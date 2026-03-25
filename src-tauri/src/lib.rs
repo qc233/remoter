@@ -38,10 +38,9 @@ pub struct SessionInfo {
     pub history: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct AppConfig {
-    pub sessions: Vec<SessionInfo>,
-    pub scripts: Vec<Script>,
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct AppSettings {
+    pub theme: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -59,6 +58,13 @@ pub struct Script {
     pub vars: Vec<ScriptVar>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AppConfig {
+    pub sessions: Vec<SessionInfo>,
+    pub scripts: Vec<Script>,
+    pub settings: AppSettings,
+}
+
 pub struct SshSession {
     pub channel: Arc<Mutex<ssh2::Channel>>,
     pub tx: mpsc::Sender<Vec<u8>>,
@@ -67,19 +73,27 @@ pub struct SshSession {
 pub struct AppState {
     pub sessions: DashMap<String, SessionInfo>,
     pub scripts: DashMap<String, Script>,
+    pub settings: Mutex<AppSettings>,
     pub config_path: PathBuf,
     pub ssh_sessions: DashMap<String, Arc<SshSession>>,
 }
 
 impl AppState {
-    fn save_to_disk(&self) {
+    fn save_config_to_disk(&self) {
         let config = AppConfig {
             sessions: self.sessions.iter().map(|kv| kv.value().clone()).collect(),
             scripts: self.scripts.iter().map(|kv| kv.value().clone()).collect(),
+            settings: self.settings.lock().clone(),
         };
         let json = serde_json::to_string_pretty(&config).expect("Failed to serialize config");
         let _ = fs::write(&self.config_path, json);
     }
+}
+
+#[tauri::command]
+async fn manual_save_to_disk(state: State<'_, AppState>) -> Result<(), String> {
+    state.save_config_to_disk();
+    Ok(())
 }
 
 #[tauri::command]
@@ -90,7 +104,7 @@ async fn update_session_group(
 ) -> Result<(), String> {
     if let Some(mut session) = state.sessions.get_mut(&id) {
         session.group = group;
-        state.save_to_disk();
+        state.save_config_to_disk();
         Ok(())
     } else {
         Err("Session not found".to_string())
@@ -284,7 +298,7 @@ async fn add_session(
         session.group = "默认".to_string();
     }
     state.sessions.insert(session.id.clone(), session.clone());
-    state.save_to_disk();
+    state.save_config_to_disk();
     Ok(session.id)
 }
 
@@ -320,7 +334,7 @@ async fn batch_add_sessions(
             history: Vec::new(),
         });
     }
-    state.save_to_disk();
+    state.save_config_to_disk();
     Ok(())
 }
 
@@ -667,21 +681,21 @@ fn add_script(state: State<'_, AppState>, script: Script) -> Result<String, Stri
         script.id = Uuid::new_v4().to_string();
     }
     state.scripts.insert(script.id.clone(), script.clone());
-    state.save_to_disk();
+    state.save_config_to_disk();
     Ok(script.id)
 }
 
 #[tauri::command]
 fn delete_script(state: State<'_, AppState>, id: String) -> Result<(), String> {
     state.scripts.remove(&id);
-    state.save_to_disk();
+    state.save_config_to_disk();
     Ok(())
 }
 
 #[tauri::command]
 fn delete_session(state: State<'_, AppState>, id: String) -> Result<(), String> {
     state.sessions.remove(&id);
-    state.save_to_disk();
+    state.save_config_to_disk();
     Ok(())
 }
 
@@ -691,16 +705,39 @@ pub fn run() {
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            let app_dir = app.path().app_data_dir().unwrap();
-            if !app_dir.exists() {
-                let _ = fs::create_dir_all(&app_dir);
+            // 1. 获取新旧路径
+            let config_dir = app.path().config_dir().expect("Failed to get config directory");
+            let new_app_dir = config_dir.join("remoter");
+            let new_config_path = new_app_dir.join("config.json");
+
+            let home_dir = app.path().home_dir().expect("Failed to get home directory");
+            let old_home_dir = home_dir.join(".remoter");
+            let old_home_config = old_home_dir.join("config.json");
+
+            let old_app_data_dir = app.path().app_data_dir().expect("Failed to get app data directory");
+            let old_app_data_config = old_app_data_dir.join("config.json");
+
+            // 2. 自动迁移逻辑
+            if !new_config_path.exists() {
+                let _ = fs::create_dir_all(&new_app_dir);
+                
+                // 优先从 app_data_dir 迁移（最初的 dev 数据）
+                if old_app_data_config.exists() {
+                    let _ = fs::copy(&old_app_data_config, &new_config_path);
+                } 
+                // 其次从上一步的 ~/.remoter 迁移
+                else if old_home_config.exists() {
+                    let _ = fs::copy(&old_home_config, &new_config_path);
+                }
             }
-            let config_path = app_dir.join("config.json");
+
+            // 3. 初始化状态
             let sessions = DashMap::new();
             let scripts = DashMap::new();
+            let mut settings = AppSettings::default();
 
-            if config_path.exists() {
-                if let Ok(content) = fs::read_to_string(&config_path) {
+            if new_config_path.exists() {
+                if let Ok(content) = fs::read_to_string(&new_config_path) {
                     if let Ok(config) = serde_json::from_str::<AppConfig>(&content) {
                         for mut s in config.sessions {
                             if s.group.is_empty() {
@@ -711,6 +748,7 @@ pub fn run() {
                         for s in config.scripts {
                             scripts.insert(s.id.clone(), s);
                         }
+                        settings = config.settings;
                     }
                 }
             }
@@ -724,13 +762,15 @@ pub fn run() {
             app.manage(AppState {
                 sessions,
                 scripts,
-                config_path,
+                settings: Mutex::new(settings),
+                config_path: new_config_path,
                 ssh_sessions: DashMap::new(),
             });
 
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            manual_save_to_disk,
             add_session,
             batch_add_sessions,
             run_command_all, 
@@ -749,4 +789,3 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
-
