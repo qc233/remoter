@@ -8,9 +8,11 @@ import { listen } from '@tauri-apps/api/event';
 interface Props {
   sessionId: string;
   isVisible?: boolean;
+  isFocused?: boolean;
+  onPathChange?: (path: string) => void;
 }
 
-export default function SSHTerminal({ sessionId, isVisible = true }: Props) {
+export default function SSHTerminal({ sessionId, isVisible = true, isFocused = false, onPathChange }: Props) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -19,6 +21,12 @@ export default function SSHTerminal({ sessionId, isVisible = true }: Props) {
   useEffect(() => {
     isVisibleRef.current = isVisible;
   }, [isVisible]);
+
+  useEffect(() => {
+    if (isFocused && xtermRef.current) {
+      xtermRef.current.focus();
+    }
+  }, [isFocused]);
 
   useEffect(() => {
     if (isVisible && fitAddonRef.current) {
@@ -75,6 +83,51 @@ export default function SSHTerminal({ sessionId, isVisible = true }: Props) {
     
     xtermRef.current = term;
     fitAddonRef.current = fitAddon;
+
+    // Shell Integration: OSC handlers for path changes
+    const handlePath = (rawPath: string) => {
+      let path = rawPath.replace(/[\r\n]+$/, '').trim();
+      if (path.startsWith('file://')) {
+        // Handle file://[hostname]/path or file:///path
+        const match = path.match(/^file:\/\/[^\/]*(.*)$/);
+        if (match) path = decodeURIComponent(match[1]);
+      }
+      if (path && path.startsWith('/')) {
+        onPathChange?.(path);
+      }
+    };
+
+    // OSC 7: CWD (Standard)
+    term.parser.registerOscHandler(7, (data) => {
+      // Some shells send hostname;file://...
+      const parts = data.split(';');
+      handlePath(parts.length > 1 ? parts[1] : parts[0]);
+      return true;
+    });
+
+    // OSC 133: Shell Integration (VSCode / FinalTerm)
+    term.parser.registerOscHandler(133, (data) => {
+      if (data.startsWith('P;Cwd=')) {
+        handlePath(data.substring(6));
+      }
+      return true;
+    });
+
+    // OSC 1337: iTerm2
+    term.parser.registerOscHandler(1337, (data) => {
+      if (data.startsWith('CurrentDir=')) {
+        handlePath(data.substring(11));
+      }
+      return true;
+    });
+
+    // Fallback: Watch for title changes (e.g., user@host: /path)
+    term.onTitleChange((title) => {
+      const match = title.match(/.*: (.*)/);
+      if (match && match[1].startsWith('/')) {
+        handlePath(match[1]);
+      }
+    });
 
     // Use ResizeObserver for more reliable sizing
     const resizeObserver = new ResizeObserver(() => {

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Plus, Settings, Terminal as TerminalIcon, Users, Trash2, Play, ChevronDown, ChevronRight, GripVertical, Check, Minus, Upload, FileText, Search, Edit } from "lucide-react";
+import { Plus, Settings, Terminal as TerminalIcon, Users, Trash2, Play, ChevronDown, ChevronRight, GripVertical, Check, Minus, Upload, FileText, Search, Edit, HardDrive } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from "@/components/ui/card";
@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
 import SSHTerminal from "./components/SSHTerminal";
+import SFTPDrawer from "./components/SFTPDrawer";
 import TitleBar from "./components/TitleBar";
 import { cn } from "@/lib/utils";
 
@@ -91,6 +92,9 @@ function App() {
   const [newGroupName, setNewGroupName] = useState("");
   const [draggedSessionId, setDraggedSessionId] = useState<string | null>(null);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+  const [sessionPaths, setSessionPaths] = useState<Record<string, string>>({});
+  const [sftpOpenSessions, setSftpOpenSessions] = useState<Set<string>>(new Set());
+  const [terminalFocusKey, setTerminalFocusKey] = useState<Record<string, number>>({});
 
   useEffect(() => {
     refreshSessions();
@@ -460,11 +464,52 @@ function App() {
                     )}
                 >
                     {tab.sessionId ? (
-                    <div className="flex-1 flex flex-col min-h-0 bg-black/5 rounded-xl border border-border p-4 shadow-inner">
+                    <div className="flex-1 flex flex-col min-h-0 bg-black/5 rounded-xl border border-border p-4 shadow-inner relative group/terminal">
                         {sessions.filter(s => s.id === tab.sessionId).map(s => (
-                        <div key={s.id} className="flex-1 flex flex-col min-h-0">
+                        <div key={s.id} className="flex-1 flex flex-col min-h-0 relative">
+                            {/* SFTP Drawer */}
+                            <SFTPDrawer 
+                                sessionId={s.id}
+                                currentPath={sessionPaths[s.id] || "/"}
+                                onPathChange={(path) => setSessionPaths(prev => ({ ...prev, [s.id]: path }))}
+                                isOpen={sftpOpenSessions.has(s.id)}
+                                onClose={() => {
+                                    const next = new Set(sftpOpenSessions);
+                                    next.delete(s.id);
+                                    setSftpOpenSessions(next);
+                                    // Trigger focus after drawer closes
+                                    setTerminalFocusKey(prev => ({ ...prev, [s.id]: Date.now() }));
+                                }}
+                            />
+                            
+                            {/* Floating SFTP Toggle Button */}
+                            {!sftpOpenSessions.has(s.id) && (
+                                <div className="absolute top-3 right-5 z-[60] opacity-0 group-hover/terminal:opacity-100 transition-opacity">
+                                    <Button 
+                                        variant="secondary" 
+                                        size="sm" 
+                                        className="h-8 gap-1.5 shadow-lg border border-border/50 bg-card/80 backdrop-blur-sm hover:bg-card"
+                                        onClick={() => {
+                                            const next = new Set(sftpOpenSessions);
+                                            next.add(s.id);
+                                            setSftpOpenSessions(next);
+                                        }}
+                                    >
+                                        <HardDrive size={14} />
+                                        SFTP
+                                    </Button>
+                                </div>
+                            )}
+
                             <div className="flex-1 relative rounded-lg overflow-hidden border border-white/10 shadow-2xl bg-black">
-                                <SSHTerminal sessionId={s.id} isVisible={activeTabIndex === idx && activePage === 'single'} />
+                                <SSHTerminal 
+                                    sessionId={s.id} 
+                                    isVisible={activeTabIndex === idx && activePage === 'single'} 
+                                    isFocused={!!terminalFocusKey[s.id]}
+                                    onPathChange={(path) => {
+                                        setSessionPaths(prev => ({ ...prev, [s.id]: path }));
+                                    }}
+                                />
                             </div>
                         </div>
                         ))}

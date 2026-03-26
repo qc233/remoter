@@ -70,12 +70,23 @@ pub struct SshSession {
     pub tx: mpsc::Sender<Vec<u8>>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SftpFile {
+    pub name: String,
+    pub size: u64,
+    pub is_dir: bool,
+    pub is_file: bool,
+    pub permissions: Option<u32>,
+    pub modified: Option<u64>,
+}
+
 pub struct AppState {
     pub sessions: DashMap<String, SessionInfo>,
     pub scripts: DashMap<String, Script>,
     pub settings: Mutex<AppSettings>,
     pub config_path: PathBuf,
     pub ssh_sessions: DashMap<String, Arc<SshSession>>,
+    pub raw_sessions: DashMap<String, Arc<Mutex<Session>>>,
 }
 
 impl AppState {
@@ -160,12 +171,15 @@ async fn start_ssh_session(
     // Set non-blocking after successful setup
     sess.set_blocking(false);
 
+    let session_arc = Arc::new(Mutex::new(sess));
+    state.raw_sessions.insert(session_id.clone(), session_arc.clone());
+
     let channel = Arc::new(Mutex::new(channel));
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
     
     let ssh_session = Arc::new(SshSession {
         channel: channel.clone(),
-        tx,
+        tx: tx.clone(),
     });
 
     state.ssh_sessions.insert(session_id.clone(), ssh_session);
@@ -173,29 +187,94 @@ async fn start_ssh_session(
     // Read/Write loop
     let app_clone = app_handle.clone();
     let session_id_clone = session_id.clone();
+    let channel_for_read = channel.clone();
     
     thread::spawn(move || {
         let mut buffer = [0u8; 8192];
         let mut write_buffer = Vec::new();
         
+        // Interception State Machine
+        let mut boot_buffer = Vec::new();
+        let mut boot_phase = 0; // 0: Waiting for first data, 1: Buffering until sentinel, 2: Normal
+        let mut injection_sent = false;
+        let mut motd_limit = 0;
+        let boot_start = std::time::Instant::now();
+        let sentinel = "__REMOTER_SYNC_DONE__"; 
+
         loop {
             let mut data_received = None;
             let mut closed = false;
             let mut would_block = true;
 
             {
-                let mut chan = channel.lock();
-                
-                // Try reading
+                let mut chan = channel_for_read.lock();
+
+                // --- Safety Timeout ---
+                if boot_phase < 2 && boot_start.elapsed() > Duration::from_secs(3) {
+                    if !boot_buffer.is_empty() {
+                        let _ = app_clone.emit(&format!("ssh_data_{}", session_id_clone), String::from_utf8_lossy(&boot_buffer).to_string());
+                        boot_buffer.clear();
+                    }
+                    boot_phase = 2;
+                }
+
+                // Normal reading
                 match chan.read(&mut buffer) {
                     Ok(0) => closed = true,
                     Ok(n) => {
-                        data_received = Some(String::from_utf8_lossy(&buffer[..n]).to_string());
+                        let chunk = &buffer[..n];
                         would_block = false;
+
+                        if boot_phase < 2 {
+                            boot_buffer.extend_from_slice(chunk);
+
+                            if boot_phase == 0 {
+                                // Phase 0: First chunk arrived, record MOTD limit and trigger injection
+                                motd_limit = boot_buffer.len();
+                                let injection = " stty -echo; _remoter_osc7(){ printf \"\\033]7;file://%s%s\\033\\\\\" \"${HOSTNAME:-$HOST}\" \"$PWD\"; }; [ -n \"$BASH_VERSION\" ] && PROMPT_COMMAND=_remoter_osc7; [ -n \"$ZSH_VERSION\" ] && precmd_functions+=(_remoter_osc7); stty echo; echo __\"\"REMOTER_SYNC_DONE__\n";
+                                let _ = chan.write_all(injection.as_bytes());
+                                injection_sent = true;
+                                boot_phase = 1;
+                            }
+
+                            // Check for sentinel in the accumulated boot_buffer
+                            let scan_str = String::from_utf8_lossy(&boot_buffer);
+                            if let Some(pos) = scan_str.find(sentinel) {
+                                let byte_pos_sentinel = scan_str[..pos].as_bytes().len();
+
+                                // 1. Use the recorded motd_limit to find the real end of MOTD (before the first prompt)
+                                let motd_end = boot_buffer[..motd_limit].iter().rposition(|&b| b == b'\n').map(|p| p + 1).unwrap_or(0);
+                                let pure_motd = &boot_buffer[..motd_end];
+
+                                if !pure_motd.is_empty() {
+                                    let _ = app_clone.emit(&format!("ssh_data_{}", session_id_clone), String::from_utf8_lossy(pure_motd).to_string());
+                                }
+
+                                // 2. Emit everything AFTER the sentinel (this is the fresh, final prompt)
+                                let byte_pos_after = byte_pos_sentinel + sentinel.len();
+                                let rest = &boot_buffer[byte_pos_after..];
+
+                                // Skip leading newlines in the rest to keep it tight
+                                let mut start = 0;
+                                while start < rest.len() && (rest[start] == b'\r' || rest[start] == b'\n') {
+                                    start += 1;
+                                }
+                                if start < rest.len() {
+                                    let _ = app_clone.emit(&format!("ssh_data_{}", session_id_clone), String::from_utf8_lossy(&rest[start..]).to_string());
+                                }
+
+                                boot_phase = 2;
+                                boot_buffer.clear();
+                            }
+                        } else {
+                            // Phase 2: Normal operation
+                            data_received = Some(String::from_utf8_lossy(chunk).to_string());
+                        }
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
                     Err(_) => closed = true,
                 }
+
 
                 if closed { break; }
 
@@ -204,7 +283,7 @@ async fn start_ssh_session(
                     write_buffer.extend_from_slice(&data);
                 }
 
-                // Try writing if there's anything in the buffer
+                // Try writing
                 if !write_buffer.is_empty() {
                     match chan.write(&write_buffer) {
                         Ok(0) => closed = true,
@@ -230,6 +309,7 @@ async fn start_ssh_session(
         }
         let state = app_clone.state::<AppState>();
         state.ssh_sessions.remove(&session_id_clone);
+        state.raw_sessions.remove(&session_id_clone);
         let _ = app_clone.emit(&format!("ssh_closed_{}", session_id_clone), ());
     });
 
@@ -699,13 +779,329 @@ fn delete_session(state: State<'_, AppState>, id: String) -> Result<(), String> 
     Ok(())
 }
 
+#[tauri::command]
+async fn sftp_list(
+    state: State<'_, AppState>,
+    session_id: String,
+    path: String,
+) -> Result<Vec<SftpFile>, String> {
+    let session_arc = state.raw_sessions.get(&session_id)
+        .ok_or_else(|| "Session not found".to_string())?
+        .clone();
+    
+    let sess = session_arc.lock();
+    // Use non-blocking SFTP
+    let sftp = loop {
+        match sess.sftp() {
+            Ok(s) => break s,
+            Err(e) => {
+                let io_err: std::io::Error = e.into();
+                if io_err.kind() == std::io::ErrorKind::WouldBlock {
+                    thread::sleep(Duration::from_millis(10));
+                } else {
+                    return Err(io_err.to_string());
+                }
+            }
+        }
+    };
+
+    let entries = loop {
+        match sftp.readdir(std::path::Path::new(&path)) {
+            Ok(e) => break e,
+            Err(e) => {
+                let io_err: std::io::Error = e.into();
+                if io_err.kind() == std::io::ErrorKind::WouldBlock {
+                    thread::sleep(Duration::from_millis(10));
+                } else {
+                    return Err(io_err.to_string());
+                }
+            }
+        }
+    };
+    
+    let mut files = Vec::new();
+    for (path_buf, stat) in entries {
+        let name = path_buf.file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        if name == "." || name == ".." {
+            continue;
+        }
+        files.push(SftpFile {
+            name,
+            size: stat.size.unwrap_or(0),
+            is_dir: stat.is_dir(),
+            is_file: stat.is_file(),
+            permissions: stat.perm,
+            modified: stat.mtime,
+        });
+    }
+    Ok(files)
+}
+
+#[tauri::command]
+async fn sftp_mkdir(
+    state: State<'_, AppState>,
+    session_id: String,
+    path: String,
+) -> Result<(), String> {
+    let session_arc = state.raw_sessions.get(&session_id)
+        .ok_or_else(|| "Session not found".to_string())?
+        .clone();
+    let sess = session_arc.lock();
+    let sftp = loop {
+        match sess.sftp() {
+            Ok(s) => break s,
+            Err(e) => {
+                let io_err: std::io::Error = e.into();
+                if io_err.kind() == std::io::ErrorKind::WouldBlock {
+                    thread::sleep(Duration::from_millis(10));
+                } else {
+                    return Err(io_err.to_string());
+                }
+            }
+        }
+    };
+    loop {
+        match sftp.mkdir(std::path::Path::new(&path), 0o755) {
+            Ok(_) => break,
+            Err(e) => {
+                let io_err: std::io::Error = e.into();
+                if io_err.kind() == std::io::ErrorKind::WouldBlock {
+                    thread::sleep(Duration::from_millis(10));
+                } else {
+                    return Err(io_err.to_string());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn sftp_rename(
+    state: State<'_, AppState>,
+    session_id: String,
+    old_path: String,
+    new_path: String,
+) -> Result<(), String> {
+    let session_arc = state.raw_sessions.get(&session_id)
+        .ok_or_else(|| "Session not found".to_string())?
+        .clone();
+    let sess = session_arc.lock();
+    let sftp = loop {
+        match sess.sftp() {
+            Ok(s) => break s,
+            Err(e) => {
+                let io_err: std::io::Error = e.into();
+                if io_err.kind() == std::io::ErrorKind::WouldBlock {
+                    thread::sleep(Duration::from_millis(10));
+                } else {
+                    return Err(io_err.to_string());
+                }
+            }
+        }
+    };
+    loop {
+        match sftp.rename(std::path::Path::new(&old_path), std::path::Path::new(&new_path), None) {
+            Ok(_) => break,
+            Err(e) => {
+                let io_err: std::io::Error = e.into();
+                if io_err.kind() == std::io::ErrorKind::WouldBlock {
+                    thread::sleep(Duration::from_millis(10));
+                } else {
+                    return Err(io_err.to_string());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn sftp_remove_file(
+    state: State<'_, AppState>,
+    session_id: String,
+    path: String,
+) -> Result<(), String> {
+    let session_arc = state.raw_sessions.get(&session_id)
+        .ok_or_else(|| "Session not found".to_string())?
+        .clone();
+    let sess = session_arc.lock();
+    let sftp = loop {
+        match sess.sftp() {
+            Ok(s) => break s,
+            Err(e) => {
+                let io_err: std::io::Error = e.into();
+                if io_err.kind() == std::io::ErrorKind::WouldBlock {
+                    thread::sleep(Duration::from_millis(10));
+                } else {
+                    return Err(io_err.to_string());
+                }
+            }
+        }
+    };
+    loop {
+        match sftp.unlink(std::path::Path::new(&path)) {
+            Ok(_) => break,
+            Err(e) => {
+                let io_err: std::io::Error = e.into();
+                if io_err.kind() == std::io::ErrorKind::WouldBlock {
+                    thread::sleep(Duration::from_millis(10));
+                } else {
+                    return Err(io_err.to_string());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn sftp_remove_dir(
+    state: State<'_, AppState>,
+    session_id: String,
+    path: String,
+) -> Result<(), String> {
+    let session_arc = state.raw_sessions.get(&session_id)
+        .ok_or_else(|| "Session not found".to_string())?
+        .clone();
+    let sess = session_arc.lock();
+    let sftp = loop {
+        match sess.sftp() {
+            Ok(s) => break s,
+            Err(e) => {
+                let io_err: std::io::Error = e.into();
+                if io_err.kind() == std::io::ErrorKind::WouldBlock {
+                    thread::sleep(Duration::from_millis(10));
+                } else {
+                    return Err(io_err.to_string());
+                }
+            }
+        }
+    };
+    loop {
+        match sftp.rmdir(std::path::Path::new(&path)) {
+            Ok(_) => break,
+            Err(e) => {
+                let io_err: std::io::Error = e.into();
+                if io_err.kind() == std::io::ErrorKind::WouldBlock {
+                    thread::sleep(Duration::from_millis(10));
+                } else {
+                    return Err(io_err.to_string());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn sftp_upload(
+    state: State<'_, AppState>,
+    session_id: String,
+    remote_path: String,
+    data: Vec<u8>,
+) -> Result<(), String> {
+    let session_arc = state.raw_sessions.get(&session_id)
+        .ok_or_else(|| "Session not found".to_string())?
+        .clone();
+    let sess = session_arc.lock();
+    let sftp = loop {
+        match sess.sftp() {
+            Ok(s) => break s,
+            Err(e) => {
+                let io_err: std::io::Error = e.into();
+                if io_err.kind() == std::io::ErrorKind::WouldBlock {
+                    thread::sleep(Duration::from_millis(10));
+                } else {
+                    return Err(io_err.to_string());
+                }
+            }
+        }
+    };
+    let mut file = loop {
+        match sftp.create(std::path::Path::new(&remote_path)) {
+            Ok(f) => break f,
+            Err(e) => {
+                let io_err: std::io::Error = e.into();
+                if io_err.kind() == std::io::ErrorKind::WouldBlock {
+                    thread::sleep(Duration::from_millis(10));
+                } else {
+                    return Err(io_err.to_string());
+                }
+            }
+        }
+    };
+    loop {
+        match file.write_all(&data) {
+            Ok(_) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn sftp_download(
+    state: State<'_, AppState>,
+    session_id: String,
+    remote_path: String,
+) -> Result<Vec<u8>, String> {
+    let session_arc = state.raw_sessions.get(&session_id)
+        .ok_or_else(|| "Session not found".to_string())?
+        .clone();
+    let sess = session_arc.lock();
+    let sftp = loop {
+        match sess.sftp() {
+            Ok(s) => break s,
+            Err(e) => {
+                let io_err: std::io::Error = e.into();
+                if io_err.kind() == std::io::ErrorKind::WouldBlock {
+                    thread::sleep(Duration::from_millis(10));
+                } else {
+                    return Err(io_err.to_string());
+                }
+            }
+        }
+    };
+    let mut file = loop {
+        match sftp.open(std::path::Path::new(&remote_path)) {
+            Ok(f) => break f,
+            Err(e) => {
+                let io_err: std::io::Error = e.into();
+                if io_err.kind() == std::io::ErrorKind::WouldBlock {
+                    thread::sleep(Duration::from_millis(10));
+                } else {
+                    return Err(io_err.to_string());
+                }
+            }
+        }
+    };
+    let mut data = Vec::new();
+    loop {
+        match file.read_to_end(&mut data) {
+            Ok(_) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Ok(data)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            // 1. 获取新旧路径
+            // ... (keep existing setup)
             let config_dir = app.path().config_dir().expect("Failed to get config directory");
             let new_app_dir = config_dir.join("remoter");
             let new_config_path = new_app_dir.join("config.json");
@@ -717,21 +1113,15 @@ pub fn run() {
             let old_app_data_dir = app.path().app_data_dir().expect("Failed to get app data directory");
             let old_app_data_config = old_app_data_dir.join("config.json");
 
-            // 2. 自动迁移逻辑
             if !new_config_path.exists() {
                 let _ = fs::create_dir_all(&new_app_dir);
-                
-                // 优先从 app_data_dir 迁移（最初的 dev 数据）
                 if old_app_data_config.exists() {
                     let _ = fs::copy(&old_app_data_config, &new_config_path);
-                } 
-                // 其次从上一步的 ~/.remoter 迁移
-                else if old_home_config.exists() {
+                } else if old_home_config.exists() {
                     let _ = fs::copy(&old_home_config, &new_config_path);
                 }
             }
 
-            // 3. 初始化状态
             let sessions = DashMap::new();
             let scripts = DashMap::new();
             let mut settings = AppSettings::default();
@@ -765,6 +1155,7 @@ pub fn run() {
                 settings: Mutex::new(settings),
                 config_path: new_config_path,
                 ssh_sessions: DashMap::new(),
+                raw_sessions: DashMap::new(),
             });
 
             Ok(())
@@ -784,7 +1175,14 @@ pub fn run() {
             start_ssh_session,
             send_ssh_data,
             resize_ssh_session,
-            update_session_group
+            update_session_group,
+            sftp_list,
+            sftp_mkdir,
+            sftp_rename,
+            sftp_remove_file,
+            sftp_remove_dir,
+            sftp_upload,
+            sftp_download
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
