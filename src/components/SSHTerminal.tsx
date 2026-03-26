@@ -16,6 +16,7 @@ export default function SSHTerminal({ sessionId, isVisible = true, isFocused = f
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
+  const isClosedRef = useRef(false);
 
   const isVisibleRef = useRef(isVisible);
   useEffect(() => {
@@ -137,21 +138,24 @@ export default function SSHTerminal({ sessionId, isVisible = true, isFocused = f
     });
     resizeObserver.observe(terminalRef.current);
 
+    const startSession = async () => {
+      isClosedRef.current = false;
+      try {
+        await invoke('start_ssh_session', { 
+          sessionId, 
+          rows: term.rows, 
+          cols: term.cols 
+        });
+      } catch (err) {
+        term.write(`\r\n\x1b[31mError: ${err}\x1b[0m\r\n`);
+        isClosedRef.current = true;
+        term.write('\x1b[33mPress "r" to retry connection.\x1b[0m\r\n');
+      }
+    };
+
     // Initial fit after a short delay to ensure container is fully laid out
     const initialFitTimeout = setTimeout(() => {
       fitAddon.fit();
-      // Start SSH session AFTER first fit
-      const startSession = async () => {
-        try {
-          await invoke('start_ssh_session', { 
-            sessionId, 
-            rows: term.rows, 
-            cols: term.cols 
-          });
-        } catch (err) {
-          term.write(`\r\n\x1b[31mError: ${err}\x1b[0m\r\n`);
-        }
-      };
       startSession();
     }, 50);
 
@@ -161,10 +165,18 @@ export default function SSHTerminal({ sessionId, isVisible = true, isFocused = f
     });
 
     const unlistenClosed = listen<void>(`ssh_closed_${sessionId}`, () => {
-      term.write('\r\n\x1b[31mConnection closed.\x1b[0m\r\n');
+      isClosedRef.current = true;
+      term.write('\r\n\x1b[31mConnection closed. Press "r" to reconnect.\x1b[0m\r\n');
     });
 
     term.onData((data) => {
+      if (isClosedRef.current) {
+        if (data.toLowerCase() === 'r') {
+          term.write('\r\n\x1b[34mReconnecting...\x1b[0m\r\n');
+          startSession();
+        }
+        return;
+      }
       invoke('send_ssh_data', { sessionId, data });
     });
 

@@ -165,7 +165,7 @@ export default function SFTPDrawer({ sessionId, currentPath, onPathChange, isOpe
           exit={{ height: 0, opacity: 0 }}
           transition={{ type: 'spring', damping: 25, stiffness: 200 }}
           className={cn(
-            "absolute top-0 left-0 right-0 z-50 bg-card border-b border-border shadow-xl overflow-hidden flex flex-col max-h-[60%]",
+            "absolute top-0 left-[2.5%] right-[2.5%] z-50 bg-card border-x border-b border-border shadow-xl overflow-hidden flex flex-col max-h-[60%] rounded-b-xl",
             isDraggingOver && "ring-2 ring-primary ring-inset bg-primary/5"
           )}
           onDragOver={(e) => { e.preventDefault(); setIsDraggingOver(true); }}
