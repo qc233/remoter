@@ -1,6 +1,7 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { File, Folder, ChevronLeft, RefreshCw, X, Download, Upload, Trash2, Plus, HardDrive } from 'lucide-react';
+import { getCurrentWindow } from '@tauri-apps/api/window';
+import { File, Folder, ChevronLeft, RefreshCw, X, Download, Upload, HardDrive } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Button } from './ui/button';
 import { cn } from '@/lib/utils';
@@ -29,6 +30,7 @@ export default function SFTPDrawer({ sessionId, currentPath, onPathChange, isOpe
   const [isEditingPath, setIsEditingPath] = useState(false);
   const [editPath, setEditPath] = useState(currentPath);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
+  const drawerRef = useRef<HTMLDivElement>(null);
 
   const fetchFiles = useCallback(async (path: string) => {
     if (!path) return;
@@ -36,7 +38,6 @@ export default function SFTPDrawer({ sessionId, currentPath, onPathChange, isOpe
     setError(null);
     try {
       const result = await invoke<SftpFile[]>('sftp_list', { sessionId, path });
-      // Sort: directories first, then files, both alphabetically
       const sorted = result.sort((a, b) => {
         if (a.is_dir === b.is_dir) {
           return a.name.localeCompare(b.name);
@@ -58,6 +59,62 @@ export default function SFTPDrawer({ sessionId, currentPath, onPathChange, isOpe
       setEditPath(currentPath);
     }
   }, [isOpen, currentPath, fetchFiles]);
+
+  // Handle Tauri native drag-drop
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const unlisten = getCurrentWindow().listen<{ paths: string[], position: { x: number, y: number } }>('tauri://drag-drop', async (event) => {
+      if (!drawerRef.current) return;
+      
+      const rect = drawerRef.current.getBoundingClientRect();
+      const { x, y } = event.payload.position;
+      
+      // Check if drop is within drawer bounds
+      if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
+        setLoading(true);
+        try {
+          for (const localPath of event.payload.paths) {
+            const fileName = localPath.split(/[\\/]/).pop() || 'uploaded_file';
+            const remotePath = currentPath.endsWith('/') ? `${currentPath}${fileName}` : `${currentPath}/${fileName}`;
+            await invoke('sftp_upload_file', {
+              sessionId,
+              remotePath,
+              localPath
+            });
+          }
+          fetchFiles(currentPath);
+        } catch (err) {
+          console.error('Native upload error:', err);
+          alert(`Upload failed: ${err}`);
+        } finally {
+          setLoading(false);
+          setIsDraggingOver(false);
+        }
+      }
+    });
+
+    const unlistenOver = getCurrentWindow().listen<{ position: { x: number, y: number } }>('tauri://drag-over', (event) => {
+      if (!drawerRef.current) return;
+      const rect = drawerRef.current.getBoundingClientRect();
+      const { x, y } = event.payload.position;
+      if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
+        setIsDraggingOver(true);
+      } else {
+        setIsDraggingOver(false);
+      }
+    });
+
+    const unlistenLeave = getCurrentWindow().listen('tauri://drag-leave', () => {
+      setIsDraggingOver(false);
+    });
+
+    return () => {
+      unlisten.then(f => f());
+      unlistenOver.then(f => f());
+      unlistenLeave.then(f => f());
+    };
+  }, [isOpen, currentPath, sessionId, fetchFiles]);
 
   const handleDirClick = (name: string) => {
     let newPath = currentPath;
@@ -86,7 +143,6 @@ export default function SFTPDrawer({ sessionId, currentPath, onPathChange, isOpe
       const remotePath = currentPath.endsWith('/') ? `${currentPath}${file.name}` : `${currentPath}/${file.name}`;
       const data = await invoke<number[]>('sftp_download', { sessionId, remotePath });
       
-      // Create a blob and download it
       const blob = new Blob([new Uint8Array(data)], { type: 'application/octet-stream' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -118,10 +174,11 @@ export default function SFTPDrawer({ sessionId, currentPath, onPathChange, isOpe
         const content = await contentPromise;
         
         const remotePath = currentPath.endsWith('/') ? `${currentPath}${file.name}` : `${currentPath}/${file.name}`;
+        // Pass Uint8Array directly for better performance in Tauri v2
         await invoke('sftp_upload', {
           sessionId,
           remotePath,
-          data: Array.from(new Uint8Array(content))
+          data: new Uint8Array(content)
         });
       }
       fetchFiles(currentPath);
@@ -142,9 +199,10 @@ export default function SFTPDrawer({ sessionId, currentPath, onPathChange, isOpe
   };
 
   const onDragStart = (e: React.DragEvent, file: SftpFile) => {
-    // For "drag out", we can't easily drag to OS desktop without complex plugins,
-    // but we can set some data for dragging into the terminal etc.
     e.dataTransfer.setData('text/plain', file.name);
+    
+    // For "drag out" to OS, true support requires local path and window.start_dragging.
+    // For now, we rely on click-to-download, but provide the name for dragging to terminal etc.
     e.dataTransfer.effectAllowed = 'copy';
   };
 
@@ -160,6 +218,7 @@ export default function SFTPDrawer({ sessionId, currentPath, onPathChange, isOpe
     <AnimatePresence>
       {isOpen && (
         <motion.div
+          ref={drawerRef}
           initial={{ height: 0, opacity: 0 }}
           animate={{ height: 'auto', opacity: 1 }}
           exit={{ height: 0, opacity: 0 }}
@@ -196,7 +255,7 @@ export default function SFTPDrawer({ sessionId, currentPath, onPathChange, isOpe
                   {currentPath.split('/').filter(Boolean).length === 0 ? (
                     <span className="opacity-40">/</span>
                   ) : (
-                    currentPath.split('/').filter(Boolean).map((part, i, arr) => (
+                    currentPath.split('/').filter(Boolean).map((part, i) => (
                       <React.Fragment key={i}>
                         <span className="opacity-40">/</span>
                         <span className="truncate">{part}</span>

@@ -1095,6 +1095,17 @@ async fn sftp_download(
     Ok(data)
 }
 
+#[tauri::command]
+async fn sftp_upload_file(
+    state: State<'_, AppState>,
+    session_id: String,
+    remote_path: String,
+    local_path: String,
+) -> Result<(), String> {
+    let data = fs::read(&local_path).map_err(|e| format!("Failed to read local file: {}", e))?;
+    sftp_upload(state, session_id, remote_path, data).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1182,6 +1193,7 @@ pub fn run() {
             sftp_remove_file,
             sftp_remove_dir,
             sftp_upload,
+            sftp_upload_file,
             sftp_download
         ])
         .run(tauri::generate_context!())

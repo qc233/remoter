@@ -134,7 +134,7 @@ function App() {
           try {
             await invoke('distribute_file_data', {
               fileName: selectedFile.name,
-              fileContent: Array.from(new Uint8Array(content)),
+              fileContent: new Uint8Array(content),
               remoteDir: remoteDir,
               ids: Array.from(selectedSessionIds)
             });
