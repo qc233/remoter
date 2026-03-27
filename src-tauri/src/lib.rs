@@ -5,7 +5,7 @@ use dashmap::DashMap;
 use uuid::Uuid;
 use parking_lot::Mutex;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{PathBuf, Path};
 use std::net::TcpStream;
 use ssh2::Session;
 use std::io::prelude::*;
@@ -157,23 +157,7 @@ async fn start_ssh_session(
     sess.set_tcp_stream(tcp);
     sess.handshake().map_err(|e| e.to_string())?;
 
-    if let Some(ref key_path) = session_info.key_path {
-        if !key_path.is_empty() {
-            let path = std::path::Path::new(key_path);
-            sess.userauth_pubkey_file(&session_info.user, None, path, None)
-                .map_err(|e| format!("Key authentication failed: {}", e))?;
-        } else if let Some(ref pass) = session_info.password {
-            sess.userauth_password(&session_info.user, pass)
-                .map_err(|e| format!("Password authentication failed: {}", e))?;
-        } else {
-            return Err("Neither key path nor password provided".to_string());
-        }
-    } else if let Some(ref pass) = session_info.password {
-        sess.userauth_password(&session_info.user, pass)
-            .map_err(|e| format!("Password authentication failed: {}", e))?;
-    } else {
-        return Err("Neither key path nor password provided".to_string());
-    }
+    authenticate_session(&app_handle, &mut sess, &session_info)?;
 
     let mut channel = sess.channel_session().map_err(|e| e.to_string())?;
     channel.request_pty("xterm-256color", None, Some((cols, rows, 0, 0))).map_err(|e| e.to_string())?;
@@ -437,20 +421,62 @@ async fn batch_add_sessions(
     Ok(())
 }
 
-#[tauri::command]
-fn authenticate_session(sess: &mut Session, session_info: &SessionInfo) -> Result<(), String> {
+fn resolve_path(key_path: &str, app_handle: &AppHandle) -> PathBuf {
+    if key_path.starts_with('~') {
+        if let Ok(home) = app_handle.path().home_dir() {
+            let mut path = home;
+            if key_path.starts_with("~/") || key_path.starts_with("~\\") {
+                path.push(&key_path[2..]);
+                return path;
+            } else if key_path == "~" {
+                return path;
+            } else {
+                path.push(&key_path[1..]);
+                return path;
+            }
+        }
+    }
+    PathBuf::from(key_path)
+}
+
+fn authenticate_session(app_handle: &AppHandle, sess: &mut Session, session_info: &SessionInfo) -> Result<(), String> {
     if let Some(ref key_path) = session_info.key_path {
         if !key_path.is_empty() {
-            let path = std::path::Path::new(key_path);
-            sess.userauth_pubkey_file(&session_info.user, None, path, None)
-                .map_err(|e| format!("Key auth failed: {}", e))?;
+            let resolved_path = resolve_path(key_path, app_handle);
+            
+            // Check if private key exists
+            if !resolved_path.exists() {
+                return Err(format!("Private key file not found: {:?}", resolved_path));
+            }
+
+            if let Some(ext) = resolved_path.extension() {
+                if ext == "ppk" {
+                    return Err("PuTTY .ppk keys are not supported. Please convert it to OpenSSH format (PEM or new OpenSSH) using PuTTYGen (Export -> Export OpenSSH key).".to_string());
+                }
+            }
+
+            // Use password as passphrase if provided
+            let passphrase = session_info.password.as_deref();
+            
+            // Try authenticating
+            if let Err(e) = sess.userauth_pubkey_file(&session_info.user, None, &resolved_path, passphrase) {
+                // Try looking for .pub file if first attempt failed
+                let pub_key_path = PathBuf::from(format!("{}.pub", resolved_path.to_string_lossy()));
+                
+                if pub_key_path.exists() {
+                    sess.userauth_pubkey_file(&session_info.user, Some(&pub_key_path), &resolved_path, passphrase)
+                        .map_err(|e2| format!("Key authentication failed: {} (Tried with .pub file: {})", e, e2))?;
+                } else {
+                    return Err(format!("Key authentication failed: {}. (Note: No .pub file found at {:?})", e, pub_key_path));
+                }
+            }
             return Ok(());
         }
     }
     
     if let Some(ref pass) = session_info.password {
         sess.userauth_password(&session_info.user, pass)
-            .map_err(|e| format!("Password auth failed: {}", e))?;
+            .map_err(|e| format!("Password authentication failed: {}", e))?;
         return Ok(());
     }
 
@@ -513,6 +539,7 @@ async fn run_command_all(
             let cmd_for_thread = cmd_clone.clone();
             let vars_for_thread = vars_clone.clone();
             
+            let app_clone_thread = app_clone.clone();
             let result = thread::spawn(move || -> Result<String, String> {
                 let tcp = TcpStream::connect(format!("{}:{}", session_info.host, session_info.port))
                     .map_err(|e| e.to_string())?;
@@ -520,7 +547,7 @@ async fn run_command_all(
                 sess.set_tcp_stream(tcp);
                 sess.handshake().map_err(|e| e.to_string())?;
 
-                authenticate_session(&mut sess, &session_info)?;
+                authenticate_session(&app_clone_thread, &mut sess, &session_info)?;
 
                 let mut channel = sess.channel_session().map_err(|e| e.to_string())?;
                 
@@ -629,6 +656,7 @@ async fn distribute_file(
                 }
             }
             
+            let app_clone_thread = app_clone.clone();
             let result = thread::spawn(move || -> Result<String, String> {
                 let tcp = TcpStream::connect(format!("{}:{}", session_info.host, session_info.port))
                     .map_err(|e| e.to_string())?;
@@ -636,7 +664,7 @@ async fn distribute_file(
                 sess.set_tcp_stream(tcp);
                 sess.handshake().map_err(|e| e.to_string())?;
 
-                authenticate_session(&mut sess, &session_info)?;
+                authenticate_session(&app_clone_thread, &mut sess, &session_info)?;
 
                 let mut remote_path = remote_dir_thread;
                 if !remote_path.ends_with('/') && !remote_path.is_empty() {
@@ -718,6 +746,7 @@ async fn distribute_file_data(
                 }
             }
             
+            let app_clone_thread = app_clone.clone();
             let result = thread::spawn(move || -> Result<String, String> {
                 let tcp = TcpStream::connect(format!("{}:{}", session_info.host, session_info.port))
                     .map_err(|e| e.to_string())?;
@@ -725,7 +754,7 @@ async fn distribute_file_data(
                 sess.set_tcp_stream(tcp);
                 sess.handshake().map_err(|e| e.to_string())?;
 
-                authenticate_session(&mut sess, &session_info)?;
+                authenticate_session(&app_clone_thread, &mut sess, &session_info)?;
 
                 let mut remote_path = remote_dir_thread;
                 if !remote_path.ends_with('/') && !remote_path.is_empty() {
