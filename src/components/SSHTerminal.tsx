@@ -7,12 +7,13 @@ import { listen } from '@tauri-apps/api/event';
 
 interface Props {
   sessionId: string;
+  instanceId: string;
   isVisible?: boolean;
   isFocused?: boolean;
   onPathChange?: (path: string) => void;
 }
 
-export default function SSHTerminal({ sessionId, isVisible = true, isFocused = false, onPathChange }: Props) {
+export default function SSHTerminal({ sessionId, instanceId, isVisible = true, isFocused = false, onPathChange }: Props) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -37,14 +38,14 @@ export default function SSHTerminal({ sessionId, isVisible = true, isFocused = f
           fitAddonRef.current.fit();
           xtermRef.current.focus();
           invoke('resize_ssh_session', { 
-            sessionId, 
+            instanceId, 
             rows: xtermRef.current.rows, 
             cols: xtermRef.current.cols 
           });
         }
       }, 50);
     }
-  }, [isVisible, sessionId]);
+  }, [isVisible, instanceId]);
 
   useEffect(() => {
     if (!terminalRef.current) return;
@@ -142,6 +143,7 @@ export default function SSHTerminal({ sessionId, isVisible = true, isFocused = f
       isClosedRef.current = false;
       try {
         await invoke('start_ssh_session', { 
+          instanceId,
           sessionId, 
           rows: term.rows, 
           cols: term.cols 
@@ -160,11 +162,11 @@ export default function SSHTerminal({ sessionId, isVisible = true, isFocused = f
     }, 50);
 
     // Handlers
-    const unlistenData = listen<string>(`ssh_data_${sessionId}`, (event) => {
+    const unlistenData = listen<string>(`ssh_data_${instanceId}`, (event) => {
       term.write(event.payload);
     });
 
-    const unlistenClosed = listen<void>(`ssh_closed_${sessionId}`, () => {
+    const unlistenClosed = listen<void>(`ssh_closed_${instanceId}`, () => {
       isClosedRef.current = true;
       term.write('\r\n\x1b[31mConnection closed. Press "r" to reconnect.\x1b[0m\r\n');
     });
@@ -177,12 +179,12 @@ export default function SSHTerminal({ sessionId, isVisible = true, isFocused = f
         }
         return;
       }
-      invoke('send_ssh_data', { sessionId, data });
+      invoke('send_ssh_data', { instanceId, data });
     });
 
     term.onResize((size) => {
       invoke('resize_ssh_session', { 
-        sessionId, 
+        instanceId, 
         rows: size.rows, 
         cols: size.cols 
       });
@@ -195,7 +197,7 @@ export default function SSHTerminal({ sessionId, isVisible = true, isFocused = f
       unlistenClosed.then(f => f());
       term.dispose();
     };
-  }, [sessionId]);
+  }, [instanceId, sessionId]);
 
   return (
     <div 

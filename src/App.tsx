@@ -46,6 +46,7 @@ type Page = 'single' | 'multi' | 'settings';
 interface Tab {
   id: string;
   sessionId: string | null;
+  instanceId: string | null;
 }
 
 function App() {
@@ -63,7 +64,7 @@ function App() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   
-  const [tabs, setTabs] = useState<Tab[]>([{ id: 'default', sessionId: null }]);
+  const [tabs, setTabs] = useState<Tab[]>([{ id: 'default', sessionId: null, instanceId: null }]);
   const [activeTabIndex, setActiveTabIndex] = useState(0);
   const [searchTerm, setSearchTerm] = useState("");
   const [multiSearchTerm, setMultiSearchTerm] = useState("");
@@ -184,14 +185,19 @@ function App() {
   }, [sessions, multiSearchTerm]);
 
   const addTab = () => {
-    const newTab = { id: Date.now().toString(), sessionId: null };
+    const newTab = { id: Date.now().toString(), sessionId: null, instanceId: null };
     setTabs([...tabs, newTab]);
     setActiveTabIndex(tabs.length);
   };
 
   const closeTab = (idx: number) => {
+    const tabToClose = tabs[idx];
+    if (tabToClose.instanceId) {
+        invoke('stop_ssh_session', { instanceId: tabToClose.instanceId });
+    }
+
     if (tabs.length === 1) {
-      setTabs([{ id: Date.now().toString(), sessionId: null }]);
+      setTabs([{ id: Date.now().toString(), sessionId: null, instanceId: null }]);
       setActiveTabIndex(0);
       return;
     }
@@ -205,6 +211,7 @@ function App() {
   const selectSession = (sessionId: string | null) => {
     const newTabs = [...tabs];
     newTabs[activeTabIndex].sessionId = sessionId;
+    newTabs[activeTabIndex].instanceId = sessionId ? `${sessionId}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}` : null;
     setTabs(newTabs);
   };
 
@@ -288,7 +295,7 @@ function App() {
     
     if (activePage === 'single') {
       const activeTab = tabs[activeTabIndex];
-      if (activeTab && activeTab.sessionId) {
+      if (activeTab && activeTab.instanceId) {
         let finalCommand = command;
         const envEntries = Object.entries(params);
         
@@ -305,7 +312,7 @@ function App() {
           finalCommand += '\n';
         }
         
-        await invoke("send_ssh_data", { sessionId: activeTab.sessionId, data: finalCommand });
+        await invoke("send_ssh_data", { instanceId: activeTab.instanceId, data: finalCommand });
         setSelectedScript(null);
         return;
       }
@@ -463,27 +470,27 @@ function App() {
                     activeTabIndex === idx ? "opacity-100 z-10" : "opacity-0 z-0 pointer-events-none"
                     )}
                 >
-                    {tab.sessionId ? (
+                    {tab.sessionId && tab.instanceId ? (
                     <div className="flex-1 flex flex-col min-h-0 bg-black/5 rounded-xl border border-border p-4 shadow-inner relative group/terminal">
                         {sessions.filter(s => s.id === tab.sessionId).map(s => (
                         <div key={s.id} className="flex-1 flex flex-col min-h-0 relative">
                             {/* SFTP Drawer */}
                             <SFTPDrawer 
-                                sessionId={s.id}
-                                currentPath={sessionPaths[s.id] || "/"}
-                                onPathChange={(path) => setSessionPaths(prev => ({ ...prev, [s.id]: path }))}
-                                isOpen={sftpOpenSessions.has(s.id)}
+                                instanceId={tab.instanceId!}
+                                currentPath={sessionPaths[tab.instanceId!] || "/"}
+                                onPathChange={(path) => setSessionPaths(prev => ({ ...prev, [tab.instanceId!]: path }))}
+                                isOpen={sftpOpenSessions.has(tab.instanceId!)}
                                 onClose={() => {
                                     const next = new Set(sftpOpenSessions);
-                                    next.delete(s.id);
+                                    next.delete(tab.instanceId!);
                                     setSftpOpenSessions(next);
                                     // Trigger focus after drawer closes
-                                    setTerminalFocusKey(prev => ({ ...prev, [s.id]: Date.now() }));
+                                    setTerminalFocusKey(prev => ({ ...prev, [tab.instanceId!]: Date.now() }));
                                 }}
                             />
                             
                             {/* Floating SFTP Toggle Button */}
-                            {!sftpOpenSessions.has(s.id) && (
+                            {!sftpOpenSessions.has(tab.instanceId!) && (
                                 <div className="absolute top-3 right-5 z-[60] opacity-0 group-hover/terminal:opacity-100 transition-opacity">
                                     <Button 
                                         variant="secondary" 
@@ -491,7 +498,7 @@ function App() {
                                         className="h-8 gap-1.5 shadow-lg border border-border/50 bg-card/80 backdrop-blur-sm hover:bg-card"
                                         onClick={() => {
                                             const next = new Set(sftpOpenSessions);
-                                            next.add(s.id);
+                                            next.add(tab.instanceId!);
                                             setSftpOpenSessions(next);
                                         }}
                                     >
@@ -504,10 +511,11 @@ function App() {
                             <div className="flex-1 relative rounded-lg overflow-hidden border border-white/10 shadow-2xl bg-black">
                                 <SSHTerminal 
                                     sessionId={s.id} 
+                                    instanceId={tab.instanceId!}
                                     isVisible={activeTabIndex === idx && activePage === 'single'} 
-                                    isFocused={!!terminalFocusKey[s.id]}
+                                    isFocused={!!terminalFocusKey[tab.instanceId!]}
                                     onPathChange={(path) => {
-                                        setSessionPaths(prev => ({ ...prev, [s.id]: path }));
+                                        setSessionPaths(prev => ({ ...prev, [tab.instanceId!]: path }));
                                     }}
                                 />
                             </div>

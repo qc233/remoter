@@ -16,14 +16,14 @@ interface SftpFile {
 }
 
 interface Props {
-  sessionId: string;
+  instanceId: string;
   currentPath: string;
   onPathChange: (path: string) => void;
   isOpen: boolean;
   onClose: () => void;
 }
 
-export default function SFTPDrawer({ sessionId, currentPath, onPathChange, isOpen, onClose }: Props) {
+export default function SFTPDrawer({ instanceId, currentPath, onPathChange, isOpen, onClose }: Props) {
   const [files, setFiles] = useState<SftpFile[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -37,7 +37,7 @@ export default function SFTPDrawer({ sessionId, currentPath, onPathChange, isOpe
     setLoading(true);
     setError(null);
     try {
-      const result = await invoke<SftpFile[]>('sftp_list', { sessionId, path });
+      const result = await invoke<SftpFile[]>('sftp_list', { instance_id: instanceId, path });
       const sorted = result.sort((a, b) => {
         if (a.is_dir === b.is_dir) {
           return a.name.localeCompare(b.name);
@@ -51,7 +51,7 @@ export default function SFTPDrawer({ sessionId, currentPath, onPathChange, isOpe
     } finally {
       setLoading(false);
     }
-  }, [sessionId]);
+  }, [instanceId]);
 
   useEffect(() => {
     if (isOpen && currentPath) {
@@ -78,7 +78,7 @@ export default function SFTPDrawer({ sessionId, currentPath, onPathChange, isOpe
             const fileName = localPath.split(/[\\/]/).pop() || 'uploaded_file';
             const remotePath = currentPath.endsWith('/') ? `${currentPath}${fileName}` : `${currentPath}/${fileName}`;
             await invoke('sftp_upload_file', {
-              sessionId,
+              instance_id: instanceId,
               remotePath,
               localPath
             });
@@ -114,7 +114,7 @@ export default function SFTPDrawer({ sessionId, currentPath, onPathChange, isOpe
       unlistenOver.then(f => f());
       unlistenLeave.then(f => f());
     };
-  }, [isOpen, currentPath, sessionId, fetchFiles]);
+  }, [isOpen, currentPath, instanceId, fetchFiles]);
 
   const handleDirClick = (name: string) => {
     let newPath = currentPath;
@@ -141,7 +141,7 @@ export default function SFTPDrawer({ sessionId, currentPath, onPathChange, isOpe
     try {
       setLoading(true);
       const remotePath = currentPath.endsWith('/') ? `${currentPath}${file.name}` : `${currentPath}/${file.name}`;
-      const data = await invoke<number[]>('sftp_download', { sessionId, remotePath });
+      const data = await invoke<number[]>('sftp_download', { instance_id: instanceId, remotePath });
       
       const blob = new Blob([new Uint8Array(data)], { type: 'application/octet-stream' });
       const url = URL.createObjectURL(blob);
@@ -176,7 +176,7 @@ export default function SFTPDrawer({ sessionId, currentPath, onPathChange, isOpe
         const remotePath = currentPath.endsWith('/') ? `${currentPath}${file.name}` : `${currentPath}/${file.name}`;
         // Pass Uint8Array directly for better performance in Tauri v2
         await invoke('sftp_upload', {
-          sessionId,
+          instance_id: instanceId,
           remotePath,
           data: new Uint8Array(content)
         });
@@ -224,14 +224,17 @@ export default function SFTPDrawer({ sessionId, currentPath, onPathChange, isOpe
           exit={{ height: 0, opacity: 0 }}
           transition={{ type: 'spring', damping: 25, stiffness: 200 }}
           className={cn(
-            "absolute top-0 left-[2.5%] right-[2.5%] z-50 bg-card border-x border-b border-border shadow-xl overflow-hidden flex flex-col max-h-[60%] rounded-b-xl",
-            isDraggingOver && "ring-2 ring-primary ring-inset bg-primary/5"
+            "absolute top-0 left-[2.5%] right-[2.5%] z-50 bg-card border-x border-b border-border shadow-xl overflow-hidden flex flex-col max-h-[60%] rounded-b-xl transition-all duration-200",
+            isDraggingOver && "ring-2 ring-primary ring-inset"
           )}
           onDragOver={(e) => { e.preventDefault(); setIsDraggingOver(true); }}
           onDragLeave={() => setIsDraggingOver(false)}
           onDrop={onDrop}
         >
-          <div className="flex items-center justify-between p-2 border-b border-border bg-muted/30">
+          {isDraggingOver && (
+            <div className="absolute inset-0 bg-primary/5 pointer-events-none z-0" />
+          )}
+          <div className="flex items-center justify-between p-2 border-b border-border bg-muted/30 relative z-10">
             <div className="flex items-center gap-2 overflow-hidden flex-1 px-1">
               <HardDrive size={14} className="text-primary shrink-0" />
               
@@ -280,7 +283,7 @@ export default function SFTPDrawer({ sessionId, currentPath, onPathChange, isOpe
             </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto min-h-0 p-2">
+          <div className="flex-1 overflow-y-auto min-h-0 p-2 relative z-10">
             {error ? (
               <div className="p-8 text-center text-destructive flex flex-col items-center gap-2">
                 <X size={48} className="opacity-20" />
@@ -332,7 +335,7 @@ export default function SFTPDrawer({ sessionId, currentPath, onPathChange, isOpe
             )}
           </div>
           
-          <div className="p-2 border-t border-border bg-muted/10 flex justify-end gap-2">
+          <div className="p-2 border-t border-border bg-muted/10 flex justify-end gap-2 relative z-10">
             <input 
               type="file" 
               id="sftp-upload-input" 

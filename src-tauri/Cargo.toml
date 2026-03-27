@@ -23,7 +23,7 @@ tauri-plugin-opener = "2"
 tauri-plugin-window-state = "2.0.0-rc"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-ssh2 = "0.9"
+ssh2 = { version = "0.9", features = ["vendored-openssl"] }
 tokio = { version = "1", features = ["full"] }
 parking_lot = "0.12"
 dashmap = "5.5"

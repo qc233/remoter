@@ -123,20 +123,31 @@ async fn update_session_group(
 }
 
 #[tauri::command]
+async fn stop_ssh_session(
+    state: State<'_, AppState>,
+    instance_id: String,
+) -> Result<(), String> {
+    state.ssh_sessions.remove(&instance_id);
+    state.raw_sessions.remove(&instance_id);
+    Ok(())
+}
+
+#[tauri::command]
 async fn start_ssh_session(
     app_handle: AppHandle,
+    instance_id: String,
     session_id: String,
     rows: u32,
     cols: u32,
 ) -> Result<(), String> {
     let state = app_handle.state::<AppState>();
     
-    if state.ssh_sessions.contains_key(&session_id) {
+    if state.ssh_sessions.contains_key(&instance_id) {
         return Ok(());
     }
 
     let session_info = state.sessions.get(&session_id)
-        .ok_or_else(|| "Session not found".to_string())?
+        .ok_or_else(|| "Session config not found".to_string())?
         .clone();
 
     let tcp = TcpStream::connect(format!("{}:{}", session_info.host, session_info.port))
@@ -172,7 +183,7 @@ async fn start_ssh_session(
     sess.set_blocking(false);
 
     let session_arc = Arc::new(Mutex::new(sess));
-    state.raw_sessions.insert(session_id.clone(), session_arc.clone());
+    state.raw_sessions.insert(instance_id.clone(), session_arc.clone());
 
     let channel = Arc::new(Mutex::new(channel));
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
@@ -182,11 +193,11 @@ async fn start_ssh_session(
         tx: tx.clone(),
     });
 
-    state.ssh_sessions.insert(session_id.clone(), ssh_session);
+    state.ssh_sessions.insert(instance_id.clone(), ssh_session);
 
     // Read/Write loop
     let app_clone = app_handle.clone();
-    let session_id_clone = session_id.clone();
+    let instance_id_clone = instance_id.clone();
     let channel_for_read = channel.clone();
     
     thread::spawn(move || {
@@ -202,6 +213,14 @@ async fn start_ssh_session(
         let sentinel = "__REMOTER_SYNC_DONE__"; 
 
         loop {
+            // Check if session still exists in state
+            {
+                let state = app_clone.state::<AppState>();
+                if !state.ssh_sessions.contains_key(&instance_id_clone) {
+                    break;
+                }
+            }
+
             let mut data_received = None;
             let mut closed = false;
             let mut would_block = true;
@@ -212,7 +231,7 @@ async fn start_ssh_session(
                 // --- Safety Timeout ---
                 if boot_phase < 2 && boot_start.elapsed() > Duration::from_secs(3) {
                     if !boot_buffer.is_empty() {
-                        let _ = app_clone.emit(&format!("ssh_data_{}", session_id_clone), String::from_utf8_lossy(&boot_buffer).to_string());
+                        let _ = app_clone.emit(&format!("ssh_data_{}", instance_id_clone), String::from_utf8_lossy(&boot_buffer).to_string());
                         boot_buffer.clear();
                     }
                     boot_phase = 2;
@@ -247,7 +266,7 @@ async fn start_ssh_session(
                                 let pure_motd = &boot_buffer[..motd_end];
 
                                 if !pure_motd.is_empty() {
-                                    let _ = app_clone.emit(&format!("ssh_data_{}", session_id_clone), String::from_utf8_lossy(pure_motd).to_string());
+                                    let _ = app_clone.emit(&format!("ssh_data_{}", instance_id_clone), String::from_utf8_lossy(pure_motd).to_string());
                                 }
 
                                 // 2. Emit everything AFTER the sentinel (this is the fresh, final prompt)
@@ -260,7 +279,7 @@ async fn start_ssh_session(
                                     start += 1;
                                 }
                                 if start < rest.len() {
-                                    let _ = app_clone.emit(&format!("ssh_data_{}", session_id_clone), String::from_utf8_lossy(&rest[start..]).to_string());
+                                    let _ = app_clone.emit(&format!("ssh_data_{}", instance_id_clone), String::from_utf8_lossy(&rest[start..]).to_string());
                                 }
 
                                 boot_phase = 2;
@@ -300,7 +319,7 @@ async fn start_ssh_session(
             if closed { break; }
             
             if let Some(d) = data_received {
-                let _ = app_clone.emit(&format!("ssh_data_{}", session_id_clone), d);
+                let _ = app_clone.emit(&format!("ssh_data_{}", instance_id_clone), d);
             }
             
             if would_block {
@@ -308,9 +327,9 @@ async fn start_ssh_session(
             }
         }
         let state = app_clone.state::<AppState>();
-        state.ssh_sessions.remove(&session_id_clone);
-        state.raw_sessions.remove(&session_id_clone);
-        let _ = app_clone.emit(&format!("ssh_closed_{}", session_id_clone), ());
+        state.ssh_sessions.remove(&instance_id_clone);
+        state.raw_sessions.remove(&instance_id_clone);
+        let _ = app_clone.emit(&format!("ssh_closed_{}", instance_id_clone), ());
     });
 
     Ok(())
@@ -319,10 +338,10 @@ async fn start_ssh_session(
 #[tauri::command]
 async fn send_ssh_data(
     state: State<'_, AppState>,
-    session_id: String,
+    instance_id: String,
     data: String,
 ) -> Result<(), String> {
-    if let Some(ssh_session) = state.ssh_sessions.get(&session_id) {
+    if let Some(ssh_session) = state.ssh_sessions.get(&instance_id) {
         ssh_session.tx.send(data.into_bytes()).map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -331,11 +350,11 @@ async fn send_ssh_data(
 #[tauri::command]
 async fn resize_ssh_session(
     state: State<'_, AppState>,
-    session_id: String,
+    instance_id: String,
     rows: u32,
     cols: u32,
 ) -> Result<(), String> {
-    if let Some(ssh_session) = state.ssh_sessions.get(&session_id) {
+    if let Some(ssh_session) = state.ssh_sessions.get(&instance_id) {
         let mut chan = ssh_session.channel.lock();
         chan.request_pty_size(cols, rows, None, None).map_err(|e| e.to_string())?;
     }
@@ -782,10 +801,10 @@ fn delete_session(state: State<'_, AppState>, id: String) -> Result<(), String> 
 #[tauri::command]
 async fn sftp_list(
     state: State<'_, AppState>,
-    session_id: String,
+    instance_id: String,
     path: String,
 ) -> Result<Vec<SftpFile>, String> {
-    let session_arc = state.raw_sessions.get(&session_id)
+    let session_arc = state.raw_sessions.get(&instance_id)
         .ok_or_else(|| "Session not found".to_string())?
         .clone();
     
@@ -843,10 +862,10 @@ async fn sftp_list(
 #[tauri::command]
 async fn sftp_mkdir(
     state: State<'_, AppState>,
-    session_id: String,
+    instance_id: String,
     path: String,
 ) -> Result<(), String> {
-    let session_arc = state.raw_sessions.get(&session_id)
+    let session_arc = state.raw_sessions.get(&instance_id)
         .ok_or_else(|| "Session not found".to_string())?
         .clone();
     let sess = session_arc.lock();
@@ -882,11 +901,11 @@ async fn sftp_mkdir(
 #[tauri::command]
 async fn sftp_rename(
     state: State<'_, AppState>,
-    session_id: String,
+    instance_id: String,
     old_path: String,
     new_path: String,
 ) -> Result<(), String> {
-    let session_arc = state.raw_sessions.get(&session_id)
+    let session_arc = state.raw_sessions.get(&instance_id)
         .ok_or_else(|| "Session not found".to_string())?
         .clone();
     let sess = session_arc.lock();
@@ -922,10 +941,10 @@ async fn sftp_rename(
 #[tauri::command]
 async fn sftp_remove_file(
     state: State<'_, AppState>,
-    session_id: String,
+    instance_id: String,
     path: String,
 ) -> Result<(), String> {
-    let session_arc = state.raw_sessions.get(&session_id)
+    let session_arc = state.raw_sessions.get(&instance_id)
         .ok_or_else(|| "Session not found".to_string())?
         .clone();
     let sess = session_arc.lock();
@@ -961,10 +980,10 @@ async fn sftp_remove_file(
 #[tauri::command]
 async fn sftp_remove_dir(
     state: State<'_, AppState>,
-    session_id: String,
+    instance_id: String,
     path: String,
 ) -> Result<(), String> {
-    let session_arc = state.raw_sessions.get(&session_id)
+    let session_arc = state.raw_sessions.get(&instance_id)
         .ok_or_else(|| "Session not found".to_string())?
         .clone();
     let sess = session_arc.lock();
@@ -1000,11 +1019,11 @@ async fn sftp_remove_dir(
 #[tauri::command]
 async fn sftp_upload(
     state: State<'_, AppState>,
-    session_id: String,
+    instance_id: String,
     remote_path: String,
     data: Vec<u8>,
 ) -> Result<(), String> {
-    let session_arc = state.raw_sessions.get(&session_id)
+    let session_arc = state.raw_sessions.get(&instance_id)
         .ok_or_else(|| "Session not found".to_string())?
         .clone();
     let sess = session_arc.lock();
@@ -1049,10 +1068,10 @@ async fn sftp_upload(
 #[tauri::command]
 async fn sftp_download(
     state: State<'_, AppState>,
-    session_id: String,
+    instance_id: String,
     remote_path: String,
 ) -> Result<Vec<u8>, String> {
-    let session_arc = state.raw_sessions.get(&session_id)
+    let session_arc = state.raw_sessions.get(&instance_id)
         .ok_or_else(|| "Session not found".to_string())?
         .clone();
     let sess = session_arc.lock();
@@ -1098,12 +1117,12 @@ async fn sftp_download(
 #[tauri::command]
 async fn sftp_upload_file(
     state: State<'_, AppState>,
-    session_id: String,
+    instance_id: String,
     remote_path: String,
     local_path: String,
 ) -> Result<(), String> {
     let data = fs::read(&local_path).map_err(|e| format!("Failed to read local file: {}", e))?;
-    sftp_upload(state, session_id, remote_path, data).await
+    sftp_upload(state, instance_id, remote_path, data).await
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1184,6 +1203,7 @@ pub fn run() {
             delete_script,
             delete_session,
             start_ssh_session,
+            stop_ssh_session,
             send_ssh_data,
             resize_ssh_session,
             update_session_group,
