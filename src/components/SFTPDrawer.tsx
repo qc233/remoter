@@ -37,7 +37,7 @@ export default function SFTPDrawer({ instanceId, currentPath, onPathChange, isOp
     setLoading(true);
     setError(null);
     try {
-      const result = await invoke<SftpFile[]>('sftp_list', { instance_id: instanceId, path });
+      const result = await invoke<SftpFile[]>('sftp_list', { instanceId, path });
       const sorted = result.sort((a, b) => {
         if (a.is_dir === b.is_dir) {
           return a.name.localeCompare(b.name);
@@ -78,7 +78,7 @@ export default function SFTPDrawer({ instanceId, currentPath, onPathChange, isOp
             const fileName = localPath.split(/[\\/]/).pop() || 'uploaded_file';
             const remotePath = currentPath.endsWith('/') ? `${currentPath}${fileName}` : `${currentPath}/${fileName}`;
             await invoke('sftp_upload_file', {
-              instance_id: instanceId,
+              instanceId,
               remotePath,
               localPath
             });
@@ -141,7 +141,7 @@ export default function SFTPDrawer({ instanceId, currentPath, onPathChange, isOp
     try {
       setLoading(true);
       const remotePath = currentPath.endsWith('/') ? `${currentPath}${file.name}` : `${currentPath}/${file.name}`;
-      const data = await invoke<number[]>('sftp_download', { instance_id: instanceId, remotePath });
+      const data = await invoke<number[]>('sftp_download', { instanceId, remotePath });
       
       const blob = new Blob([new Uint8Array(data)], { type: 'application/octet-stream' });
       const url = URL.createObjectURL(blob);
@@ -173,7 +173,7 @@ export default function SFTPDrawer({ instanceId, currentPath, onPathChange, isOp
       const remotePath = currentPath.endsWith('/') ? `${currentPath}${file.name}` : `${currentPath}/${file.name}`;
       
       await invoke('sftp_edit_file', {
-        instance_id: instanceId,
+        instanceId,
         remotePath
       });
     } catch (err) {
@@ -200,7 +200,7 @@ export default function SFTPDrawer({ instanceId, currentPath, onPathChange, isOp
         const remotePath = currentPath.endsWith('/') ? `${currentPath}${file.name}` : `${currentPath}/${file.name}`;
         // Pass Uint8Array directly for better performance in Tauri v2
         await invoke('sftp_upload', {
-          instance_id: instanceId,
+          instanceId,
           remotePath,
           data: new Uint8Array(content)
         });
