@@ -16,8 +16,6 @@ jobs:
         platform: [macos-latest, ubuntu-22.04, windows-latest]
 
     runs-on: ${{ matrix.platform }}
-    outputs:
-      release_id: ${{ steps.create-release.outputs.release_id }}
     steps:
       - uses: actions/checkout@v4
 
@@ -57,4 +55,4 @@ jobs:
           prerelease: false
           # 关键：允许在 Release 已存在时仅上传附件
           allowUpsertDestructiveReleases: true 
-          args: ${{ matrix.platform == 'ubuntu-22.04' && '--bundles appimage,deb' || '' }}
+          args: ${{ matrix.platform == 'ubuntu-22.04' && '--bundles appimage,deb' || (matrix.platform == 'macos-latest' && '--bundles app' || '') }}
