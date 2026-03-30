@@ -32,6 +32,7 @@ function App() {
   const [searchTerm, setSearchTerm] = useState("");
   const [sessionPaths, setSessionPaths] = useState<Record<string, string>>({});
   const [sftpOpenSessions, setSftpOpenSessions] = useState<Set<string>>(new Set());
+  const [portProxyOpenSessions, setPortProxyOpenSessions] = useState<Set<string>>(new Set());
   const [terminalFocusKey, setTerminalFocusKey] = useState<Record<string, number>>({});
 
   // --- Multi Page State ---
@@ -356,7 +357,8 @@ function App() {
               selectSession={selectSession} searchTerm={searchTerm} setSearchTerm={setSearchTerm}
               filteredSessions={filteredSessions} sessionPaths={sessionPaths}
               setSessionPaths={setSessionPaths} sftpOpenSessions={sftpOpenSessions}
-              setSftpOpenSessions={setSftpOpenSessions} terminalFocusKey={terminalFocusKey}
+              setSftpOpenSessions={setSftpOpenSessions} portProxyOpenSessions={portProxyOpenSessions}
+              setPortProxyOpenSessions={setPortProxyOpenSessions} terminalFocusKey={terminalFocusKey}
               setTerminalFocusKey={setTerminalFocusKey} startEdit={startEdit}
               handleDelete={handleDelete} activePage={activePage}
             />

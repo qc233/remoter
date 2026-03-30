@@ -13,6 +13,7 @@ pub struct AppState {
     pub config_path: PathBuf,
     pub ssh_sessions: DashMap<String, Arc<SshSession>>,
     pub raw_sessions: DashMap<String, Arc<Mutex<ssh2::Session>>>,
+    pub port_proxies: DashMap<String, std::sync::mpsc::Sender<()>>,
 }
 
 impl AppState {

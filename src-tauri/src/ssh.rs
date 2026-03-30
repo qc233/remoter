@@ -583,3 +583,149 @@ pub async fn distribute_file_data(
     }
     Ok(())
 }
+
+#[tauri::command]
+pub async fn start_port_proxy(
+    app_handle: AppHandle,
+    session_id: String,
+    local_port: u16,
+    remote_port: u16,
+) -> Result<String, String> {
+    let state = app_handle.state::<AppState>();
+    
+    let session_info = state.sessions.get(&session_id)
+        .ok_or_else(|| "Session config not found".to_string())?
+        .clone();
+
+    let proxy_id = format!("{}-{}-{}", session_id, local_port, remote_port);
+    if state.port_proxies.contains_key(&proxy_id) {
+        return Err("Proxy already running".to_string());
+    }
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    state.port_proxies.insert(proxy_id.clone(), tx);
+
+    let proxy_id_clone = proxy_id.clone();
+    let app_handle_thread = app_handle.clone();
+    
+    thread::spawn(move || {
+        let listener = match std::net::TcpListener::bind(format!("127.0.0.1:{}", local_port)) {
+            Ok(l) => l,
+            Err(_) => {
+                let state = app_handle_thread.state::<AppState>();
+                state.port_proxies.remove(&proxy_id_clone);
+                return;
+            }
+        };
+
+        listener.set_nonblocking(true).unwrap();
+
+        loop {
+            if let Ok(_) = rx.try_recv() {
+                break;
+            }
+
+            match listener.accept() {
+                Ok((mut local_stream, _)) => {
+                    let sess_info = session_info.clone();
+                    let app_handle_clone = app_handle_thread.clone();
+                    thread::spawn(move || {
+                        let tcp = match TcpStream::connect(format!("{}:{}", sess_info.host, sess_info.port)) {
+                            Ok(t) => t,
+                            Err(_) => return,
+                        };
+                        let mut sess = match Session::new() {
+                            Ok(s) => s,
+                            Err(_) => return,
+                        };
+                        sess.set_tcp_stream(tcp);
+                        if sess.handshake().is_err() { return; }
+
+                        if authenticate_session(&app_handle_clone, &mut sess, &sess_info).is_err() {
+                            return;
+                        }
+
+                        let mut channel = match sess.channel_direct_tcpip("127.0.0.1", remote_port, None) {
+                            Ok(c) => c,
+                            Err(_) => return,
+                        };
+
+                        sess.set_blocking(false);
+                        local_stream.set_nonblocking(true).unwrap();
+
+                        let mut buf1 = [0u8; 8192];
+                        let mut buf2 = [0u8; 8192];
+
+                        loop {
+                            let mut read_something = false;
+
+                            match local_stream.read(&mut buf1) {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    let mut written = 0;
+                                    while written < n {
+                                        match channel.write(&buf1[written..n]) {
+                                            Ok(w) => written += w,
+                                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                                thread::sleep(Duration::from_millis(10));
+                                            }
+                                            Err(_) => { read_something=false; break; }
+                                        }
+                                    }
+                                    read_something = true;
+                                }
+                                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {},
+                                Err(_) => break,
+                            }
+
+                            match channel.read(&mut buf2) {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    let mut written = 0;
+                                    while written < n {
+                                        match local_stream.write(&buf2[written..n]) {
+                                            Ok(w) => written += w,
+                                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                                thread::sleep(Duration::from_millis(10));
+                                            }
+                                            Err(_) => { read_something=false; break; }
+                                        }
+                                    }
+                                    read_something = true;
+                                }
+                                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {},
+                                Err(_) => break,
+                            }
+
+                            if !read_something {
+                                thread::sleep(Duration::from_millis(10));
+                            }
+                        }
+                    });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(100));
+                }
+                Err(_) => break,
+            }
+        }
+        
+        let state = app_handle_thread.state::<AppState>();
+        state.port_proxies.remove(&proxy_id_clone);
+    });
+
+    Ok(proxy_id)
+}
+
+#[tauri::command]
+pub async fn stop_port_proxy(
+    app_handle: AppHandle,
+    proxy_id: String,
+) -> Result<(), String> {
+    let state = app_handle.state::<AppState>();
+    if let Some(proxy) = state.port_proxies.get(&proxy_id) {
+        let _ = proxy.value().send(());
+    }
+    state.port_proxies.remove(&proxy_id);
+    Ok(())
+}

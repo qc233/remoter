@@ -73,6 +73,7 @@ pub fn run() {
                 config_path: new_config_path,
                 ssh_sessions: DashMap::new(),
                 raw_sessions: DashMap::new(),
+                port_proxies: DashMap::new(),
             });
 
             Ok(())
@@ -94,6 +95,8 @@ pub fn run() {
             ssh::run_command_all,
             ssh::distribute_file,
             ssh::distribute_file_data,
+            ssh::start_port_proxy,
+            ssh::stop_port_proxy,
             sftp::sftp_list,
             sftp::sftp_mkdir,
             sftp::sftp_rename,

@@ -1,6 +1,6 @@
 [package]
 name = "remoter"
-version = "0.1.1"
+version = "0.1.2"
 description = "A Tauri App"
 authors = ["qc233"]
 edition = "2021"
