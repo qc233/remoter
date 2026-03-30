@@ -160,6 +160,30 @@ export default function SFTPDrawer({ instanceId, currentPath, onPathChange, isOp
     }
   };
 
+  const handleFileClick = async (file: SftpFile) => {
+    if (file.is_dir) return;
+    
+    if (file.size > 1024 * 1024) {
+      alert('文件过大，无法在线打开（限制1MB），请下载后查看。');
+      return;
+    }
+    
+    try {
+      setLoading(true);
+      const remotePath = currentPath.endsWith('/') ? `${currentPath}${file.name}` : `${currentPath}/${file.name}`;
+      
+      await invoke('sftp_edit_file', {
+        instance_id: instanceId,
+        remotePath
+      });
+    } catch (err) {
+      console.error('Edit file error:', err);
+      alert(`无法打开文件: ${err}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleFileUpload = async (files: FileList) => {
     setLoading(true);
     try {
@@ -302,7 +326,7 @@ export default function SFTPDrawer({ instanceId, currentPath, onPathChange, isOp
                     key={file.name}
                     draggable={!file.is_dir}
                     onDragStart={(e) => onDragStart(e, file)}
-                    onClick={() => file.is_dir ? handleDirClick(file.name) : null}
+                    onClick={() => file.is_dir ? handleDirClick(file.name) : handleFileClick(file)}
                     className={cn(
                       "group flex items-center gap-3 p-2 rounded-md transition-all cursor-pointer border border-transparent relative",
                       file.is_dir ? "hover:bg-primary/10 hover:border-primary/20" : "hover:bg-muted"
