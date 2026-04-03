@@ -1,6 +1,8 @@
+import { useState } from "react";
 import { Script } from "@/types";
 import { Button } from "@/components/ui/button";
-import { Plus, Settings } from "lucide-react";
+import { Input } from "@/components/ui/input";
+import { Plus, Settings, Search } from "lucide-react";
 
 interface Props {
   scripts: Script[];
@@ -10,6 +12,13 @@ interface Props {
 }
 
 export default function ScriptSidebar({ scripts, onRunScript, onManageScripts, onNewScript }: Props) {
+  const [searchTerm, setSearchTerm] = useState("");
+
+  const filteredScripts = scripts.filter(s => 
+    s.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
+    s.command_template.toLowerCase().includes(searchTerm.toLowerCase())
+  );
+
   return (
     <aside className="w-64 border-l border-border bg-card/40 backdrop-blur-md flex flex-col p-4 gap-4">
       <div className="flex items-center justify-between px-2 mb-2">
@@ -23,8 +32,19 @@ export default function ScriptSidebar({ scripts, onRunScript, onManageScripts, o
           <Settings size={14} />
         </Button>
       </div>
-      <div className="flex flex-col gap-2 overflow-y-auto">
-        {scripts.map(script => (
+
+      <div className="relative px-1">
+        <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" size={14} />
+        <Input
+          placeholder="搜索脚本或命令..."
+          className="pl-8 h-8 bg-card/40 border-border/50 text-xs focus:ring-primary/20"
+          value={searchTerm}
+          onChange={e => setSearchTerm(e.target.value)}
+        />
+      </div>
+
+      <div className="flex flex-col gap-2 overflow-y-auto px-1 pb-1">
+        {filteredScripts.map(script => (
           <Button 
             key={script.id} 
             variant="outline" 
@@ -37,6 +57,9 @@ export default function ScriptSidebar({ scripts, onRunScript, onManageScripts, o
             </div>
           </Button>
         ))}
+        {filteredScripts.length === 0 && (
+          <div className="text-center py-4 text-xs text-muted-foreground">未找到匹配的脚本</div>
+        )}
         <Button 
           variant="ghost" 
           className="mt-2 border border-dashed border-border"
