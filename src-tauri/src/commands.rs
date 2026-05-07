@@ -114,3 +114,29 @@ pub fn delete_session(state: State<'_, AppState>, id: String) -> Result<(), Stri
     state.save_config_to_disk();
     Ok(())
 }
+
+#[tauri::command]
+pub fn get_settings(state: State<'_, AppState>) -> AppSettings {
+    state.settings.lock().clone()
+}
+
+#[tauri::command]
+pub fn set_max_concurrency(state: State<'_, AppState>, value: usize) -> Result<(), String> {
+    let value = value.max(1);
+    state.settings.lock().max_concurrency = value;
+    state.save_config_to_disk();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_group(state: State<'_, AppState>, group: String) -> Result<(), String> {
+    let ids_to_remove: Vec<String> = state.sessions.iter()
+        .filter(|kv| kv.value().group == group)
+        .map(|kv| kv.key().clone())
+        .collect();
+    for id in ids_to_remove {
+        state.sessions.remove(&id);
+    }
+    state.save_config_to_disk();
+    Ok(())
+}

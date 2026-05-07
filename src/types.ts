@@ -9,7 +9,7 @@ export interface SessionInfo {
   key_path?: string;
   jump_host?: string;
   group: string;
-  status: 'Idle' | 'Running' | 'Success' | 'Failure';
+  status: 'Idle' | 'Running' | 'Success' | 'Failure' | 'Aborted';
   history: string[];
 }
 

@@ -41,6 +41,7 @@ function App() {
   const [multiSearchTerm, setMultiSearchTerm] = useState("");
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [historySession, setHistorySession] = useState<SessionInfo | null>(null);
+  const [isRunning, setIsRunning] = useState(false);
 
   // --- File Distribution ---
   const [isFileDialogOpen, setIsFileDialogOpen] = useState(false);
@@ -78,7 +79,15 @@ function App() {
     let unlistenFn: (() => void) | undefined;
     const setupListener = async () => {
       unlistenFn = await listen<SessionInfo>("session_updated", (event) => {
-        setSessions(prev => prev.map(s => s.id === event.payload.id ? event.payload : s));
+        setSessions(prev => {
+          const updated = prev.map(s => s.id === event.payload.id ? event.payload : s);
+          // Check if any session is still Running; if none, mark batch as done
+          const anyRunning = updated.some(s => s.status === 'Running');
+          if (!anyRunning) {
+            setIsRunning(false);
+          }
+          return updated;
+        });
       });
     };
     setupListener();
@@ -210,6 +219,29 @@ function App() {
   const handleDelete = async (id: string) => {
     await invoke("delete_session", { id });
     refreshSessions();
+  };
+
+  const handleDeleteGroup = async (groupName: string) => {
+    await invoke("delete_group", { group: groupName });
+    // Remove deleted session ids from selection
+    const groupSessionIds = sessions.filter(s => s.group === groupName).map(s => s.id);
+    setSelectedSessionIds(prev => {
+      const next = new Set(prev);
+      groupSessionIds.forEach(id => next.delete(id));
+      return next;
+    });
+    refreshSessions();
+  };
+
+  const handleRunCommand = () => {
+    setIsRunning(true);
+    invoke("run_command_all", { command: broadcastCmd, vars: null, ids: Array.from(selectedSessionIds) });
+    setBroadcastCmd("");
+  };
+
+  const handleAbortCommand = async () => {
+    await invoke("abort_command_all", { ids: Array.from(selectedSessionIds) });
+    setIsRunning(false);
   };
 
   const runScript = async (script: Script, params: Record<string, string>) => {
@@ -369,8 +401,11 @@ function App() {
               broadcastCmd={broadcastCmd} setBroadcastCmd={setBroadcastCmd}
               collapsedGroups={collapsedGroups} multiSearchTerm={multiSearchTerm}
               setMultiSearchTerm={setMultiSearchTerm}
-              onRunCommand={() => { invoke("run_command_all", { command: broadcastCmd, vars: null, ids: Array.from(selectedSessionIds) }); setBroadcastCmd(""); }}
+              isRunning={isRunning}
+              onRunCommand={handleRunCommand}
+              onAbortCommand={handleAbortCommand}
               onOpenFileDialog={() => setIsFileDialogOpen(true)}
+              onDeleteGroup={handleDeleteGroup}
               toggleSessionSelection={toggleSessionSelection}
               toggleGroupSelection={toggleGroupSelection}
               toggleGroupCollapse={toggleGroupCollapse}

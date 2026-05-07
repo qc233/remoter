@@ -74,6 +74,7 @@ pub fn run() {
                 ssh_sessions: DashMap::new(),
                 raw_sessions: DashMap::new(),
                 port_proxies: DashMap::new(),
+                cancel_token: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             });
 
             Ok(())
@@ -93,6 +94,7 @@ pub fn run() {
             ssh::send_ssh_data,
             ssh::resize_ssh_session,
             ssh::run_command_all,
+            ssh::abort_command_all,
             ssh::distribute_file,
             ssh::distribute_file_data,
             ssh::start_port_proxy,
@@ -106,6 +108,9 @@ pub fn run() {
             sftp::sftp_upload_file,
             sftp::sftp_download,
             sftp::sftp_edit_file,
+            commands::get_settings,
+            commands::set_max_concurrency,
+            commands::delete_group,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

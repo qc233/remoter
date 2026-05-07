@@ -9,6 +9,7 @@ pub enum SessionStatus {
     Running,
     Success,
     Failure,
+    Aborted,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -26,9 +27,22 @@ pub struct SessionInfo {
     pub history: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppSettings {
     pub theme: Option<String>,
+    #[serde(default = "default_max_concurrency")]
+    pub max_concurrency: usize,
+}
+
+fn default_max_concurrency() -> usize { 10 }
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            theme: None,
+            max_concurrency: 10,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

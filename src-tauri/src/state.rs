@@ -1,6 +1,6 @@
 use dashmap::DashMap;
 use parking_lot::Mutex;
-use std::sync::Arc;
+use std::sync::{Arc, atomic::AtomicBool};
 use std::path::PathBuf;
 use std::fs;
 
@@ -14,6 +14,7 @@ pub struct AppState {
     pub ssh_sessions: DashMap<String, Arc<SshSession>>,
     pub raw_sessions: DashMap<String, Arc<Mutex<ssh2::Session>>>,
     pub port_proxies: DashMap<String, std::sync::mpsc::Sender<()>>,
+    pub cancel_token: Arc<AtomicBool>,
 }
 
 impl AppState {

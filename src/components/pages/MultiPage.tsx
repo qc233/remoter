@@ -1,11 +1,11 @@
-import React from "react";
+import React, { useState } from "react";
 import { SessionInfo } from "@/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
-import { Plus, Play, ChevronDown, ChevronRight, GripVertical, Check, Minus, Upload, Search, Edit } from "lucide-react";
+import { Plus, Play, ChevronDown, ChevronRight, GripVertical, Check, Minus, Upload, Search, Edit, Trash2, Square } from "lucide-react";
 
 interface Props {
   activePage: string;
@@ -17,8 +17,11 @@ interface Props {
   collapsedGroups: Set<string>;
   multiSearchTerm: string;
   setMultiSearchTerm: (term: string) => void;
+  isRunning: boolean;
   onRunCommand: () => void;
+  onAbortCommand: () => void;
   onOpenFileDialog: () => void;
+  onDeleteGroup: (groupName: string) => void;
   toggleSessionSelection: (id: string) => void;
   toggleGroupSelection: (sessions: SessionInfo[]) => void;
   toggleGroupCollapse: (groupName: string) => void;
@@ -32,10 +35,12 @@ interface Props {
 export default function MultiPage({
   activePage, selectedSessionIds, groupedSessions,
   broadcastCmd, setBroadcastCmd, collapsedGroups, multiSearchTerm,
-  setMultiSearchTerm, onRunCommand, onOpenFileDialog,
+  setMultiSearchTerm, isRunning, onRunCommand, onAbortCommand, onOpenFileDialog, onDeleteGroup,
   toggleSessionSelection, toggleGroupSelection, toggleGroupCollapse,
   setHistorySession, startEdit, onDragStart, onDrop, onDropNewGroup,
 }: Props) {
+  const [confirmDeleteGroup, setConfirmDeleteGroup] = useState<string | null>(null);
+
   return (
     <div 
       className={cn(
@@ -57,10 +62,19 @@ export default function MultiPage({
                 <Button 
                   onClick={onRunCommand}
                   className="gap-2 flex-1" 
-                  disabled={selectedSessionIds.size === 0 || !broadcastCmd.trim()}
+                  disabled={selectedSessionIds.size === 0 || !broadcastCmd.trim() || isRunning}
                 >
                   <Play size={14} /> 执行命令分发
                 </Button>
+                {isRunning && (
+                  <Button 
+                    variant="destructive"
+                    onClick={onAbortCommand}
+                    className="gap-2"
+                  >
+                    <Square size={14} /> 中止
+                  </Button>
+                )}
                 <Button 
                   variant="secondary"
                   onClick={onOpenFileDialog}
@@ -130,6 +144,38 @@ export default function MultiPage({
                 <span className="font-semibold text-sm">{groupName}</span>
                 <span className="text-xs text-muted-foreground bg-muted px-1.5 py-0.5 rounded-full">{groupSessions.length}</span>
               </div>
+              <div className="flex items-center gap-1 opacity-0 group-hover/header:opacity-100 transition-opacity">
+                {confirmDeleteGroup === groupName ? (
+                  <div className="flex items-center gap-1">
+                    <span className="text-xs text-destructive mr-1">确认删除?</span>
+                    <Button 
+                      variant="destructive" 
+                      size="sm" 
+                      className="h-6 text-xs px-2"
+                      onClick={() => { onDeleteGroup(groupName); setConfirmDeleteGroup(null); }}
+                    >
+                      确认
+                    </Button>
+                    <Button 
+                      variant="ghost" 
+                      size="sm" 
+                      className="h-6 text-xs px-2"
+                      onClick={() => setConfirmDeleteGroup(null)}
+                    >
+                      取消
+                    </Button>
+                  </div>
+                ) : (
+                  <Button 
+                    variant="ghost" 
+                    size="icon" 
+                    className="h-6 w-6 text-muted-foreground hover:text-destructive" 
+                    onClick={() => setConfirmDeleteGroup(groupName)}
+                  >
+                    <Trash2 size={14} />
+                  </Button>
+                )}
+              </div>
             </div>
             
             {!collapsedGroups.has(groupName) && (
@@ -142,7 +188,8 @@ export default function MultiPage({
                       "transition-all cursor-pointer relative group/card",
                       s.status === 'Running' && "border-primary shadow-primary/20",
                       s.status === 'Success' && "border-green-500 shadow-green-500/20",
-                      s.status === 'Failure' && "border-destructive shadow-destructive/20"
+                      s.status === 'Failure' && "border-destructive shadow-destructive/20",
+                      s.status === 'Aborted' && "border-yellow-500 shadow-yellow-500/20"
                     )}
                     onClick={() => setHistorySession(s)}
                   >
@@ -183,7 +230,8 @@ export default function MultiPage({
                           s.status === 'Idle' && "bg-muted",
                           s.status === 'Running' && "bg-primary animate-pulse",
                           s.status === 'Success' && "bg-green-500",
-                          s.status === 'Failure' && "bg-destructive"
+                          s.status === 'Failure' && "bg-destructive",
+                          s.status === 'Aborted' && "bg-yellow-500"
                         )} />
                         <span className="text-xs text-muted-foreground">{s.status}</span>
                       </div>

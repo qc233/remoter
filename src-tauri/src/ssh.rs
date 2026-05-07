@@ -300,22 +300,64 @@ pub async fn run_command_all(
     ids: Option<Vec<String>>,
 ) -> Result<(), String> {
     let state = app_handle.state::<AppState>();
+
+    // Cancel any previous running batch
+    state.cancel_token.store(true, std::sync::atomic::Ordering::SeqCst);
+    // Small delay to let previous tasks notice cancellation
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
     let session_ids: Vec<String> = if let Some(selected_ids) = ids {
         set_unselected_to_idle(&state, &window, &selected_ids);
         selected_ids
     } else {
         state.sessions.iter().map(|kv| kv.key().clone()).collect()
     };
-    
+
+    // Immediately set ALL selected hosts to Idle
+    for id in &session_ids {
+        if let Some(mut session_ref) = state.sessions.get_mut(id) {
+            session_ref.status = SessionStatus::Idle;
+            let _ = window.emit("session_updated", session_ref.clone());
+        }
+    }
+
+    // Reset cancel token for the new batch
+    state.cancel_token.store(false, std::sync::atomic::Ordering::SeqCst);
+
+    let max_concurrency = {
+        let settings = state.settings.lock();
+        settings.max_concurrency.max(1)
+    };
+
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrency));
+
     for id in session_ids {
         let app_clone = app_handle.clone();
         let id_clone = id.clone();
         let cmd_clone = command.clone();
         let vars_clone = vars.clone();
         let window_clone = window.clone();
+        let sem_clone = semaphore.clone();
         
         tokio::spawn(async move {
+            let _permit = match sem_clone.acquire().await {
+                Ok(p) => p,
+                Err(_) => return,
+            };
+
+            // Check cancellation before starting
             let state = app_clone.state::<AppState>();
+            if state.cancel_token.load(std::sync::atomic::Ordering::SeqCst) {
+                if let Some(mut session_ref) = state.sessions.get_mut(&id_clone) {
+                    if session_ref.status != SessionStatus::Success && session_ref.status != SessionStatus::Failure {
+                        session_ref.status = SessionStatus::Aborted;
+                        session_ref.history.push(format!("$ {}\nAborted: Task cancelled before execution", cmd_clone));
+                        let _ = window_clone.emit("session_updated", session_ref.clone());
+                    }
+                }
+                return;
+            }
+
             let session_info = {
                 let session_ref = state.sessions.get(&id_clone);
                 match session_ref {
@@ -336,7 +378,13 @@ pub async fn run_command_all(
             let vars_for_thread = vars_clone.clone();
             
             let app_clone_thread = app_clone.clone();
+            let cancel_token = state.cancel_token.clone();
             let result = thread::spawn(move || -> Result<String, String> {
+                // Check cancellation
+                if cancel_token.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Err("Aborted".to_string());
+                }
+
                 let tcp = TcpStream::connect(format!("{}:{}", session_info.host, session_info.port))
                     .map_err(|e| e.to_string())?;
                 let mut sess = Session::new().map_err(|e| e.to_string())?;
@@ -376,17 +424,25 @@ pub async fn run_command_all(
                 }
             }).join().unwrap_or(Err("Thread panicked".to_string()));
 
+            // Check cancellation after execution
+            let was_cancelled = state.cancel_token.load(std::sync::atomic::Ordering::SeqCst);
+
             {
                 let mut session_ref = state.sessions.get_mut(&id_clone);
                 if let Some(session) = session_ref.as_deref_mut() {
-                    match result {
-                        Ok(output) => {
-                            session.status = SessionStatus::Success;
-                            session.history.push(format!("$ {}\n{}", cmd_clone, output));
-                        }
-                        Err(err) => {
-                            session.status = SessionStatus::Failure;
-                            session.history.push(format!("$ {}\nError: {}", cmd_clone, err));
+                    if was_cancelled && result.as_ref().err().map_or(false, |e| e == "Aborted") {
+                        session.status = SessionStatus::Aborted;
+                        session.history.push(format!("$ {}\nAborted: Task cancelled", cmd_clone));
+                    } else {
+                        match result {
+                            Ok(output) => {
+                                session.status = SessionStatus::Success;
+                                session.history.push(format!("$ {}\n{}", cmd_clone, output));
+                            }
+                            Err(err) => {
+                                session.status = SessionStatus::Failure;
+                                session.history.push(format!("$ {}\nError: {}", cmd_clone, err));
+                            }
                         }
                     }
                     let _ = window_clone.emit("session_updated", session.clone());
@@ -394,6 +450,32 @@ pub async fn run_command_all(
             }
         });
     }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn abort_command_all(
+    app_handle: AppHandle,
+    window: tauri::Window,
+    ids: Vec<String>,
+) -> Result<(), String> {
+    let state = app_handle.state::<AppState>();
+    
+    // Set cancellation flag to prevent new tasks from starting
+    state.cancel_token.store(true, std::sync::atomic::Ordering::SeqCst);
+    
+    // For sessions that are still Running, set them to Aborted 
+    // and try to send interrupt signal via channel if they have an active exec channel
+    for id in &ids {
+        if let Some(mut session_ref) = state.sessions.get_mut(id) {
+            if session_ref.status == SessionStatus::Running || session_ref.status == SessionStatus::Idle {
+                session_ref.status = SessionStatus::Aborted;
+                session_ref.history.push("Aborted: Task cancelled by user".to_string());
+                let _ = window.emit("session_updated", session_ref.clone());
+            }
+        }
+    }
+    
     Ok(())
 }
 
