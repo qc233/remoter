@@ -86,6 +86,32 @@ export default function SSHTerminal({ sessionId, instanceId, isVisible = true, i
     xtermRef.current = term;
     fitAddonRef.current = fitAddon;
 
+    const handleContextMenu = async (e: MouseEvent) => {
+      e.preventDefault();
+      if (term.hasSelection()) {
+        const selection = term.getSelection();
+        if (selection) {
+          await navigator.clipboard.writeText(selection);
+          term.clearSelection();
+        }
+      } else {
+        try {
+          const text = await navigator.clipboard.readText();
+          if (text) {
+            if (isClosedRef.current) return;
+            invoke('send_ssh_data', { instanceId, data: text });
+          }
+        } catch (err) {
+          console.error('Failed to read clipboard:', err);
+        }
+      }
+    };
+
+    const terminalElement = terminalRef.current;
+    if (terminalElement) {
+      terminalElement.addEventListener('contextmenu', handleContextMenu);
+    }
+
     // Shell Integration: OSC handlers for path changes
     const handlePath = (rawPath: string) => {
       let path = rawPath.replace(/[\r\n]+$/, '').trim();
@@ -191,6 +217,9 @@ export default function SSHTerminal({ sessionId, instanceId, isVisible = true, i
     });
 
     return () => {
+      if (terminalElement) {
+        terminalElement.removeEventListener('contextmenu', handleContextMenu);
+      }
       resizeObserver.disconnect();
       clearTimeout(initialFitTimeout);
       unlistenData.then(f => f());

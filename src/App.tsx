@@ -41,7 +41,7 @@ function App() {
   const [multiSearchTerm, setMultiSearchTerm] = useState("");
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [historySession, setHistorySession] = useState<SessionInfo | null>(null);
-  const [isRunning, setIsRunning] = useState(false);
+  const [currentBatchId, setCurrentBatchId] = useState<string | null>(null);
 
   // --- File Distribution ---
   const [isFileDialogOpen, setIsFileDialogOpen] = useState(false);
@@ -80,13 +80,7 @@ function App() {
     const setupListener = async () => {
       unlistenFn = await listen<SessionInfo>("session_updated", (event) => {
         setSessions(prev => {
-          const updated = prev.map(s => s.id === event.payload.id ? event.payload : s);
-          // Check if any session is still Running; if none, mark batch as done
-          const anyRunning = updated.some(s => s.status === 'Running');
-          if (!anyRunning) {
-            setIsRunning(false);
-          }
-          return updated;
+          return prev.map(s => s.id === event.payload.id ? event.payload : s);
         });
       });
     };
@@ -131,6 +125,8 @@ function App() {
     });
     return groups;
   }, [sessions, multiSearchTerm]);
+
+  const isBatchRunning = useMemo(() => sessions.some(s => s.status === 'Running'), [sessions]);
 
   // === Handlers ===
   const addTab = () => {
@@ -234,18 +230,22 @@ function App() {
   };
 
   const handleRunCommand = () => {
-    setIsRunning(true);
-    invoke("run_command_all", { command: broadcastCmd, vars: null, ids: Array.from(selectedSessionIds) });
+    const batchId = Date.now().toString() + "-" + Math.random().toString(36).substr(2, 9);
+    setCurrentBatchId(batchId);
+    invoke("run_command_all", { command: broadcastCmd, vars: null, ids: Array.from(selectedSessionIds), batchId });
     setBroadcastCmd("");
   };
 
   const handleAbortCommand = async () => {
-    await invoke("abort_command_all", { ids: Array.from(selectedSessionIds) });
-    setIsRunning(false);
+    if (currentBatchId) {
+      await invoke("cancel_batch", { batchId: currentBatchId });
+      setCurrentBatchId(null);
+    }
   };
 
   const runScript = async (script: Script, params: Record<string, string>) => {
     const command = script.command_template;
+    setSelectedScript(null);
     if (activePage === 'single') {
       const activeTab = tabs[activeTabIndex];
       if (activeTab && activeTab.instanceId) {
@@ -257,19 +257,23 @@ function App() {
         }
         if (!finalCommand.endsWith('\n')) finalCommand += '\n';
         await invoke("send_ssh_data", { instanceId: activeTab.instanceId, data: finalCommand });
-        setSelectedScript(null);
         return;
       }
     }
     let ids: string[] = [];
     if (activePage === 'multi') ids = Array.from(selectedSessionIds);
-    if (ids.length > 0) await invoke("run_command_all", { command, vars: params, ids });
-    setSelectedScript(null);
+    if (ids.length > 0) {
+      const batchId = Date.now().toString() + "-" + Math.random().toString(36).substr(2, 9);
+      setCurrentBatchId(batchId);
+      await invoke("run_command_all", { command, vars: params, ids, batchId });
+    }
   };
 
   const handleFileDistribute = async () => {
     if (!selectedFile) return;
     setIsUploading(true);
+    const batchId = Date.now().toString() + "-" + Math.random().toString(36).substr(2, 9);
+    setCurrentBatchId(batchId);
     try {
       const reader = new FileReader();
       reader.onload = async (e) => {
@@ -278,7 +282,7 @@ function App() {
           try {
             await invoke('distribute_file_data', {
               fileName: selectedFile.name, fileContent: new Uint8Array(content),
-              remoteDir, ids: Array.from(selectedSessionIds)
+              remoteDir, ids: Array.from(selectedSessionIds), batchId
             });
             setIsFileDialogOpen(false);
             setSelectedFile(null);
@@ -401,9 +405,9 @@ function App() {
               broadcastCmd={broadcastCmd} setBroadcastCmd={setBroadcastCmd}
               collapsedGroups={collapsedGroups} multiSearchTerm={multiSearchTerm}
               setMultiSearchTerm={setMultiSearchTerm}
-              isRunning={isRunning}
+              isBatchRunning={isBatchRunning}
               onRunCommand={handleRunCommand}
-              onAbortCommand={handleAbortCommand}
+              onStopBatch={handleAbortCommand}
               onOpenFileDialog={() => setIsFileDialogOpen(true)}
               onDeleteGroup={handleDeleteGroup}
               toggleSessionSelection={toggleSessionSelection}

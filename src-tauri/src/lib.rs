@@ -74,7 +74,7 @@ pub fn run() {
                 ssh_sessions: DashMap::new(),
                 raw_sessions: DashMap::new(),
                 port_proxies: DashMap::new(),
-                cancel_token: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                running_batches: DashMap::new(),
             });
 
             Ok(())
@@ -89,12 +89,12 @@ pub fn run() {
             commands::delete_script,
             commands::delete_session,
             commands::update_session_group,
+            commands::cancel_batch,
             ssh::start_ssh_session,
             ssh::stop_ssh_session,
             ssh::send_ssh_data,
             ssh::resize_ssh_session,
             ssh::run_command_all,
-            ssh::abort_command_all,
             ssh::distribute_file,
             ssh::distribute_file_data,
             ssh::start_port_proxy,

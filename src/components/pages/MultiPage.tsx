@@ -17,9 +17,9 @@ interface Props {
   collapsedGroups: Set<string>;
   multiSearchTerm: string;
   setMultiSearchTerm: (term: string) => void;
-  isRunning: boolean;
+  isBatchRunning: boolean;
   onRunCommand: () => void;
-  onAbortCommand: () => void;
+  onStopBatch: () => void;
   onOpenFileDialog: () => void;
   onDeleteGroup: (groupName: string) => void;
   toggleSessionSelection: (id: string) => void;
@@ -35,7 +35,7 @@ interface Props {
 export default function MultiPage({
   activePage, selectedSessionIds, groupedSessions,
   broadcastCmd, setBroadcastCmd, collapsedGroups, multiSearchTerm,
-  setMultiSearchTerm, isRunning, onRunCommand, onAbortCommand, onOpenFileDialog, onDeleteGroup,
+  setMultiSearchTerm, isBatchRunning, onRunCommand, onStopBatch, onOpenFileDialog, onDeleteGroup,
   toggleSessionSelection, toggleGroupSelection, toggleGroupCollapse,
   setHistorySession, startEdit, onDragStart, onDrop, onDropNewGroup,
 }: Props) {
@@ -59,27 +59,28 @@ export default function MultiPage({
                 className="bg-background/50 min-h-[100px] font-mono"
               />
               <div className="flex gap-2">
-                <Button 
-                  onClick={onRunCommand}
-                  className="gap-2 flex-1" 
-                  disabled={selectedSessionIds.size === 0 || !broadcastCmd.trim() || isRunning}
-                >
-                  <Play size={14} /> 执行命令分发
-                </Button>
-                {isRunning && (
+                {isBatchRunning ? (
                   <Button 
                     variant="destructive"
-                    onClick={onAbortCommand}
-                    className="gap-2"
+                    onClick={onStopBatch}
+                    className="gap-2 flex-1 animate-pulse" 
                   >
-                    <Square size={14} /> 中止
+                    <Square fill="currentColor" size={14} /> 停止执行
+                  </Button>
+                ) : (
+                  <Button 
+                    onClick={onRunCommand}
+                    className="gap-2 flex-1" 
+                    disabled={selectedSessionIds.size === 0 || !broadcastCmd.trim()}
+                  >
+                    <Play size={14} /> 执行命令分发
                   </Button>
                 )}
                 <Button 
                   variant="secondary"
                   onClick={onOpenFileDialog}
                   className="gap-2" 
-                  disabled={selectedSessionIds.size === 0}
+                  disabled={selectedSessionIds.size === 0 || isBatchRunning}
                 >
                   <Upload size={14} /> 分发文件
                 </Button>

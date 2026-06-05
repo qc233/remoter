@@ -1,6 +1,6 @@
 use dashmap::DashMap;
 use parking_lot::Mutex;
-use std::sync::{Arc, atomic::AtomicBool};
+use std::sync::Arc;
 use std::path::PathBuf;
 use std::fs;
 
@@ -14,7 +14,7 @@ pub struct AppState {
     pub ssh_sessions: DashMap<String, Arc<SshSession>>,
     pub raw_sessions: DashMap<String, Arc<Mutex<ssh2::Session>>>,
     pub port_proxies: DashMap<String, std::sync::mpsc::Sender<()>>,
-    pub cancel_token: Arc<AtomicBool>,
+    pub running_batches: DashMap<String, bool>,
 }
 
 impl AppState {
@@ -26,6 +26,14 @@ impl AppState {
         };
         let json = serde_json::to_string_pretty(&config).expect("Failed to serialize config");
         let _ = fs::write(&self.config_path, json);
+    }
+
+    pub fn is_batch_running(&self, batch_id: &str) -> bool {
+        self.running_batches.contains_key(batch_id)
+    }
+
+    pub fn cancel_batch(&self, batch_id: &str) {
+        self.running_batches.remove(batch_id);
     }
 }
 

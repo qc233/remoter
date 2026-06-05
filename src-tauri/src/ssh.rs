@@ -298,13 +298,9 @@ pub async fn run_command_all(
     vars: Option<HashMap<String, String>>,
     window: tauri::Window,
     ids: Option<Vec<String>>,
+    batch_id: String,
 ) -> Result<(), String> {
     let state = app_handle.state::<AppState>();
-
-    // Cancel any previous running batch
-    state.cancel_token.store(true, std::sync::atomic::Ordering::SeqCst);
-    // Small delay to let previous tasks notice cancellation
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
     let session_ids: Vec<String> = if let Some(selected_ids) = ids {
         set_unselected_to_idle(&state, &window, &selected_ids);
@@ -321,8 +317,7 @@ pub async fn run_command_all(
         }
     }
 
-    // Reset cancel token for the new batch
-    state.cancel_token.store(false, std::sync::atomic::Ordering::SeqCst);
+    state.running_batches.insert(batch_id.clone(), true);
 
     let max_concurrency = {
         let settings = state.settings.lock();
@@ -338,6 +333,7 @@ pub async fn run_command_all(
         let vars_clone = vars.clone();
         let window_clone = window.clone();
         let sem_clone = semaphore.clone();
+        let batch_id_clone = batch_id.clone();
         
         tokio::spawn(async move {
             let _permit = match sem_clone.acquire().await {
@@ -347,7 +343,7 @@ pub async fn run_command_all(
 
             // Check cancellation before starting
             let state = app_clone.state::<AppState>();
-            if state.cancel_token.load(std::sync::atomic::Ordering::SeqCst) {
+            if !state.is_batch_running(&batch_id_clone) {
                 if let Some(mut session_ref) = state.sessions.get_mut(&id_clone) {
                     if session_ref.status != SessionStatus::Success && session_ref.status != SessionStatus::Failure {
                         session_ref.status = SessionStatus::Aborted;
@@ -376,20 +372,29 @@ pub async fn run_command_all(
             
             let cmd_for_thread = cmd_clone.clone();
             let vars_for_thread = vars_clone.clone();
+            let batch_id_thread = batch_id_clone.clone();
             
             let app_clone_thread = app_clone.clone();
-            let cancel_token = state.cancel_token.clone();
             let result = thread::spawn(move || -> Result<String, String> {
-                // Check cancellation
-                if cancel_token.load(std::sync::atomic::Ordering::SeqCst) {
-                    return Err("Aborted".to_string());
+                let state_ref = app_clone_thread.state::<AppState>();
+                if !state_ref.is_batch_running(&batch_id_thread) {
+                    return Err("Cancelled by user".to_string());
                 }
 
                 let tcp = TcpStream::connect(format!("{}:{}", session_info.host, session_info.port))
                     .map_err(|e| e.to_string())?;
+                
+                if !state_ref.is_batch_running(&batch_id_thread) {
+                    return Err("Cancelled by user".to_string());
+                }
+
                 let mut sess = Session::new().map_err(|e| e.to_string())?;
                 sess.set_tcp_stream(tcp);
                 sess.handshake().map_err(|e| e.to_string())?;
+
+                if !state_ref.is_batch_running(&batch_id_thread) {
+                    return Err("Cancelled by user".to_string());
+                }
 
                 authenticate_session(&app_clone_thread, &mut sess, &session_info)?;
 
@@ -412,8 +417,27 @@ pub async fn run_command_all(
 
                 channel.exec(&final_command).map_err(|e| e.to_string())?;
                 
+                sess.set_blocking(false);
                 let mut output = String::new();
-                channel.read_to_string(&mut output).map_err(|e| e.to_string())?;
+                let mut buf = [0u8; 8192];
+                let state_ref = app_clone_thread.state::<AppState>();
+                
+                loop {
+                    if !state_ref.is_batch_running(&batch_id_thread) {
+                        return Err("Cancelled by user".to_string());
+                    }
+                    match channel.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            output.push_str(&String::from_utf8_lossy(&buf[..n]));
+                        }
+                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(50));
+                        }
+                        Err(e) => return Err(e.to_string()),
+                    }
+                }
+                
                 let _ = channel.wait_close();
                 
                 let exit_status = channel.exit_status().map_err(|e| e.to_string())?;
@@ -424,25 +448,21 @@ pub async fn run_command_all(
                 }
             }).join().unwrap_or(Err("Thread panicked".to_string()));
 
-            // Check cancellation after execution
-            let was_cancelled = state.cancel_token.load(std::sync::atomic::Ordering::SeqCst);
-
             {
                 let mut session_ref = state.sessions.get_mut(&id_clone);
                 if let Some(session) = session_ref.as_deref_mut() {
-                    if was_cancelled && result.as_ref().err().map_or(false, |e| e == "Aborted") {
-                        session.status = SessionStatus::Aborted;
-                        session.history.push(format!("$ {}\nAborted: Task cancelled", cmd_clone));
-                    } else {
-                        match result {
-                            Ok(output) => {
-                                session.status = SessionStatus::Success;
-                                session.history.push(format!("$ {}\n{}", cmd_clone, output));
-                            }
-                            Err(err) => {
-                                session.status = SessionStatus::Failure;
-                                session.history.push(format!("$ {}\nError: {}", cmd_clone, err));
-                            }
+                    match result {
+                        Ok(output) => {
+                            session.status = SessionStatus::Success;
+                            session.history.push(format!("$ {}\n{}", cmd_clone, output));
+                        }
+                        Err(err) if err == "Cancelled by user" => {
+                            session.status = SessionStatus::Aborted;
+                            session.history.push(format!("$ {}\nAborted: Task cancelled", cmd_clone));
+                        }
+                        Err(err) => {
+                            session.status = SessionStatus::Failure;
+                            session.history.push(format!("$ {}\nError: {}", cmd_clone, err));
                         }
                     }
                     let _ = window_clone.emit("session_updated", session.clone());
@@ -454,38 +474,13 @@ pub async fn run_command_all(
 }
 
 #[tauri::command]
-pub async fn abort_command_all(
-    app_handle: AppHandle,
-    window: tauri::Window,
-    ids: Vec<String>,
-) -> Result<(), String> {
-    let state = app_handle.state::<AppState>();
-    
-    // Set cancellation flag to prevent new tasks from starting
-    state.cancel_token.store(true, std::sync::atomic::Ordering::SeqCst);
-    
-    // For sessions that are still Running, set them to Aborted 
-    // and try to send interrupt signal via channel if they have an active exec channel
-    for id in &ids {
-        if let Some(mut session_ref) = state.sessions.get_mut(id) {
-            if session_ref.status == SessionStatus::Running || session_ref.status == SessionStatus::Idle {
-                session_ref.status = SessionStatus::Aborted;
-                session_ref.history.push("Aborted: Task cancelled by user".to_string());
-                let _ = window.emit("session_updated", session_ref.clone());
-            }
-        }
-    }
-    
-    Ok(())
-}
-
-#[tauri::command]
 pub async fn distribute_file(
     app_handle: AppHandle,
     local_path: String,
     remote_dir: String,
     window: tauri::Window,
     ids: Option<Vec<String>>,
+    batch_id: String,
 ) -> Result<(), String> {
     let state = app_handle.state::<AppState>();
     let session_ids: Vec<String> = if let Some(selected_ids) = ids {
@@ -494,6 +489,8 @@ pub async fn distribute_file(
     } else {
         state.sessions.iter().map(|kv| kv.key().clone()).collect()
     };
+    
+    state.running_batches.insert(batch_id.clone(), true);
     
     let local_path_buf = std::path::PathBuf::from(&local_path);
     let file_name = local_path_buf.file_name()
@@ -513,6 +510,7 @@ pub async fn distribute_file(
         let file_name_clone = file_name.clone();
         let file_content_clone = file_content.clone();
         let window_clone = window.clone();
+        let batch_id_clone = batch_id.clone();
         
         tokio::spawn(async move {
             let state = app_clone.state::<AppState>();
@@ -533,12 +531,27 @@ pub async fn distribute_file(
             }
             
             let app_clone_thread = app_clone.clone();
+            let batch_id_thread = batch_id_clone.clone();
             let result = thread::spawn(move || -> Result<String, String> {
+                let state_ref = app_clone_thread.state::<AppState>();
+                if !state_ref.is_batch_running(&batch_id_thread) {
+                    return Err("Cancelled by user".to_string());
+                }
+
                 let tcp = TcpStream::connect(format!("{}:{}", session_info.host, session_info.port))
                     .map_err(|e| e.to_string())?;
+                
+                if !state_ref.is_batch_running(&batch_id_thread) {
+                    return Err("Cancelled by user".to_string());
+                }
+
                 let mut sess = Session::new().map_err(|e| e.to_string())?;
                 sess.set_tcp_stream(tcp);
                 sess.handshake().map_err(|e| e.to_string())?;
+
+                if !state_ref.is_batch_running(&batch_id_thread) {
+                    return Err("Cancelled by user".to_string());
+                }
 
                 authenticate_session(&app_clone_thread, &mut sess, &session_info)?;
 
@@ -548,9 +561,21 @@ pub async fn distribute_file(
                 }
                 remote_path.push_str(&file_name_clone);
 
+                if !state_ref.is_batch_running(&batch_id_thread) {
+                    return Err("Cancelled by user".to_string());
+                }
+
                 let mut remote_file = sess.scp_send(std::path::Path::new(&remote_path), 0o644, file_size, None)
                     .map_err(|e| e.to_string())?;
-                remote_file.write_all(&file_content_clone).map_err(|e| e.to_string())?;
+                
+                // Chunked write for cancellation
+                let chunk_size = 65536; // 64KB chunks
+                for chunk in file_content_clone.chunks(chunk_size) {
+                    if !state_ref.is_batch_running(&batch_id_thread) {
+                        return Err("Cancelled by user".to_string());
+                    }
+                    remote_file.write_all(chunk).map_err(|e| e.to_string())?;
+                }
                 
                 Ok(format!("Successfully uploaded to {}", remote_path))
             }).join().unwrap_or(Err("Thread panicked".to_string()));
@@ -562,6 +587,10 @@ pub async fn distribute_file(
                         Ok(msg) => {
                             session.status = SessionStatus::Success;
                             session.history.push(format!("[File] {}", msg));
+                        }
+                        Err(err) if err == "Cancelled by user" => {
+                            session.status = SessionStatus::Aborted;
+                            session.history.push(format!("[File] Aborted: Task cancelled"));
                         }
                         Err(err) => {
                             session.status = SessionStatus::Failure;
@@ -584,6 +613,7 @@ pub async fn distribute_file_data(
     remote_dir: String,
     window: tauri::Window,
     ids: Option<Vec<String>>,
+    batch_id: String,
 ) -> Result<(), String> {
     let state = app_handle.state::<AppState>();
     let session_ids: Vec<String> = if let Some(selected_ids) = ids {
@@ -592,6 +622,8 @@ pub async fn distribute_file_data(
     } else {
         state.sessions.iter().map(|kv| kv.key().clone()).collect()
     };
+    
+    state.running_batches.insert(batch_id.clone(), true);
     
     let file_size = file_content.len() as u64;
 
@@ -603,6 +635,7 @@ pub async fn distribute_file_data(
         let file_name_clone = file_name.clone();
         let file_content_clone = file_content.clone();
         let window_clone = window.clone();
+        let batch_id_clone = batch_id.clone();
         
         tokio::spawn(async move {
             let state = app_clone.state::<AppState>();
@@ -623,12 +656,27 @@ pub async fn distribute_file_data(
             }
             
             let app_clone_thread = app_clone.clone();
+            let batch_id_thread = batch_id_clone.clone();
             let result = thread::spawn(move || -> Result<String, String> {
+                let state_ref = app_clone_thread.state::<AppState>();
+                if !state_ref.is_batch_running(&batch_id_thread) {
+                    return Err("Cancelled by user".to_string());
+                }
+
                 let tcp = TcpStream::connect(format!("{}:{}", session_info.host, session_info.port))
                     .map_err(|e| e.to_string())?;
+                
+                if !state_ref.is_batch_running(&batch_id_thread) {
+                    return Err("Cancelled by user".to_string());
+                }
+
                 let mut sess = Session::new().map_err(|e| e.to_string())?;
                 sess.set_tcp_stream(tcp);
                 sess.handshake().map_err(|e| e.to_string())?;
+
+                if !state_ref.is_batch_running(&batch_id_thread) {
+                    return Err("Cancelled by user".to_string());
+                }
 
                 authenticate_session(&app_clone_thread, &mut sess, &session_info)?;
 
@@ -638,9 +686,21 @@ pub async fn distribute_file_data(
                 }
                 remote_path.push_str(&file_name_clone);
 
+                if !state_ref.is_batch_running(&batch_id_thread) {
+                    return Err("Cancelled by user".to_string());
+                }
+
                 let mut remote_file = sess.scp_send(std::path::Path::new(&remote_path), 0o644, file_size, None)
                     .map_err(|e| e.to_string())?;
-                remote_file.write_all(&file_content_clone).map_err(|e| e.to_string())?;
+                
+                // Chunked write for cancellation
+                let chunk_size = 65536; // 64KB chunks
+                for chunk in file_content_clone.chunks(chunk_size) {
+                    if !state_ref.is_batch_running(&batch_id_thread) {
+                        return Err("Cancelled by user".to_string());
+                    }
+                    remote_file.write_all(chunk).map_err(|e| e.to_string())?;
+                }
                 
                 Ok(format!("Successfully uploaded to {}", remote_path))
             }).join().unwrap_or(Err("Thread panicked".to_string()));
@@ -652,6 +712,10 @@ pub async fn distribute_file_data(
                         Ok(msg) => {
                             session.status = SessionStatus::Success;
                             session.history.push(format!("[File] {}", msg));
+                        }
+                        Err(err) if err == "Cancelled by user" => {
+                            session.status = SessionStatus::Aborted;
+                            session.history.push(format!("[File] Aborted: Task cancelled"));
                         }
                         Err(err) => {
                             session.status = SessionStatus::Failure;

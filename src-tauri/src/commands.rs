@@ -140,3 +140,9 @@ pub fn delete_group(state: State<'_, AppState>, group: String) -> Result<(), Str
     state.save_config_to_disk();
     Ok(())
 }
+
+#[tauri::command]
+pub async fn cancel_batch(state: State<'_, AppState>, batch_id: String) -> Result<(), String> {
+    state.cancel_batch(&batch_id);
+    Ok(())
+}
