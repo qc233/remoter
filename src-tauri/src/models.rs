@@ -27,6 +27,21 @@ pub struct SessionInfo {
     pub history: Vec<String>,
 }
 
+impl SessionInfo {
+    /// A running batch cannot survive an application restart. Convert the
+    /// transient state before it is restored from, or written to, disk.
+    pub fn recover_interrupted_run(&mut self) -> bool {
+        if self.status != SessionStatus::Running {
+            return false;
+        }
+
+        self.status = SessionStatus::Aborted;
+        self.history
+            .push("Aborted: Application exited while the task was running".to_string());
+        true
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppSettings {
     pub theme: Option<String>,
@@ -80,4 +95,43 @@ pub struct SftpFile {
     pub is_file: bool,
     pub permissions: Option<u32>,
     pub modified: Option<u64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session(status: SessionStatus) -> SessionInfo {
+        SessionInfo {
+            id: "1".into(),
+            name: "test".into(),
+            host: "localhost".into(),
+            port: 22,
+            user: "user".into(),
+            password: None,
+            key_path: None,
+            jump_host: None,
+            group: "default".into(),
+            status,
+            history: vec![],
+        }
+    }
+
+    #[test]
+    fn running_session_is_recovered_as_aborted() {
+        let mut session = session(SessionStatus::Running);
+
+        assert!(session.recover_interrupted_run());
+        assert_eq!(session.status, SessionStatus::Aborted);
+        assert_eq!(session.history.len(), 1);
+    }
+
+    #[test]
+    fn completed_session_is_not_changed() {
+        let mut session = session(SessionStatus::Success);
+
+        assert!(!session.recover_interrupted_run());
+        assert_eq!(session.status, SessionStatus::Success);
+        assert!(session.history.is_empty());
+    }
 }

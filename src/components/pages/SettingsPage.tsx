@@ -68,6 +68,26 @@ export default function SettingsPage({ activePage }: Props) {
             <Button variant="outline" onClick={() => invoke("manual_save_to_disk")}>强制保存</Button>
           </CardFooter>
         </Card>
+
+        <Card className="bg-card/60">
+          <CardHeader>
+            <CardTitle>SSH Config 注入</CardTitle>
+            <CardDescription>将所有会话注入到 ~/.ssh/config.remoter 中，以便在终端使用 ssh remoter-name 进行连接。</CardDescription>
+          </CardHeader>
+          <CardFooter className="flex flex-col items-start gap-2">
+            <Button variant="outline" onClick={async () => {
+              try {
+                const res = await invoke("inject_ssh_config");
+                alert(res);
+              } catch (e) {
+                alert("注入失败: " + e);
+              }
+            }}>注入到 SSH Config</Button>
+            <p className="text-xs text-muted-foreground">
+              注: 注入后，请确保在 ~/.ssh/config 中添加了 'Include config.remoter'。
+            </p>
+          </CardFooter>
+        </Card>
       </div>
     </div>
   );

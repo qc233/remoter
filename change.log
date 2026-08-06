@@ -1,6 +1,14 @@
+### v0.1.6
+* right click anti-shake
+* fix multiline invoke problem
+
+### v0.1.5
+* right click copy paste
+
+
 ### v0.1.4
-double check
-interrupt command
+* double check
+* interrupt command (real)
 
 ### v0.1.3
 #### feature

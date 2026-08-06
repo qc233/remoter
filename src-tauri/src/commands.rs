@@ -146,3 +146,10 @@ pub async fn cancel_batch(state: State<'_, AppState>, batch_id: String) -> Resul
     state.cancel_batch(&batch_id);
     Ok(())
 }
+
+#[tauri::command]
+pub async fn inject_ssh_config() -> Result<String, String> {
+    crate::cli::run_inject_config(None, "remoter-")
+        .map_err(|e| e.to_string())?;
+    Ok("Successfully injected into ~/.ssh/config.remoter".to_string())
+}

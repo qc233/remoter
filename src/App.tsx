@@ -92,7 +92,6 @@ function App() {
     const data = await invoke<SessionInfo[]>("get_sessions");
     setSessions(data);
     if (!isInitialized && data.length > 0) {
-      setSelectedSessionIds(new Set(data.map(s => s.id)));
       setIsInitialized(true);
     }
   };

@@ -20,7 +20,15 @@ pub struct AppState {
 impl AppState {
     pub fn save_config_to_disk(&self) {
         let config = AppConfig {
-            sessions: self.sessions.iter().map(|kv| kv.value().clone()).collect(),
+            sessions: self
+                .sessions
+                .iter()
+                .map(|kv| {
+                    let mut session = kv.value().clone();
+                    session.recover_interrupted_run();
+                    session
+                })
+                .collect(),
             scripts: self.scripts.iter().map(|kv| kv.value().clone()).collect(),
             settings: self.settings.lock().clone(),
         };

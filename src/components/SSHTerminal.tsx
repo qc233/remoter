@@ -18,6 +18,7 @@ export default function SSHTerminal({ sessionId, instanceId, isVisible = true, i
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const isClosedRef = useRef(false);
+  const lastContextMenuTimeRef = useRef(0);
 
   const isVisibleRef = useRef(isVisible);
   useEffect(() => {
@@ -86,8 +87,27 @@ export default function SSHTerminal({ sessionId, instanceId, isVisible = true, i
     xtermRef.current = term;
     fitAddonRef.current = fitAddon;
 
+    const handlePaste = async () => {
+      try {
+        const text = await navigator.clipboard.readText();
+        if (text && !isClosedRef.current) {
+          // Replace Windows CRLF and CR with LF to avoid ^M in bracketed paste mode
+          term.paste(text.replace(/\r\n/g, '\n').replace(/\r/g, '\n'));
+        }
+      } catch (err) {
+        console.error('Failed to read clipboard:', err);
+      }
+    };
+
     const handleContextMenu = async (e: MouseEvent) => {
       e.preventDefault();
+
+      const now = Date.now();
+      if (now - lastContextMenuTimeRef.current < 300) {
+        return;
+      }
+      lastContextMenuTimeRef.current = now;
+
       if (term.hasSelection()) {
         const selection = term.getSelection();
         if (selection) {
@@ -95,17 +115,26 @@ export default function SSHTerminal({ sessionId, instanceId, isVisible = true, i
           term.clearSelection();
         }
       } else {
-        try {
-          const text = await navigator.clipboard.readText();
-          if (text) {
-            if (isClosedRef.current) return;
-            invoke('send_ssh_data', { instanceId, data: text });
-          }
-        } catch (err) {
-          console.error('Failed to read clipboard:', err);
-        }
+        await handlePaste();
       }
     };
+
+    term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
+      if (e.type === 'keydown') {
+        // Handle standard terminal paste shortcuts: Ctrl+Shift+V, Cmd+V, Shift+Insert
+        const isPasteShortcut =
+          (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'v') ||
+          (e.metaKey && e.key.toLowerCase() === 'v') ||
+          (e.shiftKey && e.key === 'Insert');
+
+        if (isPasteShortcut) {
+          handlePaste();
+          e.preventDefault();
+          return false;
+        }
+      }
+      return true;
+    });
 
     const terminalElement = terminalRef.current;
     if (terminalElement) {

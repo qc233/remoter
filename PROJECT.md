@@ -10,6 +10,7 @@
 | **前端** | React 19 + TypeScript + Vite 7 + TailwindCSS v4 |
 | **UI 组件** | shadcn/ui (New York 风格) + Framer Motion 动画 |
 | **后端** | Rust (Tauri v2) + ssh2 (vendored-openssl) |
+| **CLI 模式** | 支持 ProxyCommand 跳板模式与 ssh_config 注入 |
 | **终端** | xterm.js v5 + xterm-addon-fit |
 | **并发** | tokio + dashmap + parking_lot |
 | **包管理** | pnpm |

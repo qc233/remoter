@@ -3,6 +3,7 @@ pub mod state;
 pub mod ssh;
 pub mod sftp;
 pub mod commands;
+pub mod cli;
 
 use dashmap::DashMap;
 use parking_lot::Mutex;
@@ -42,6 +43,7 @@ pub fn run() {
             let sessions = DashMap::new();
             let scripts = DashMap::new();
             let mut settings = AppSettings::default();
+            let mut recovered_interrupted_run = false;
 
             if new_config_path.exists() {
                 if let Ok(content) = fs::read_to_string(&new_config_path) {
@@ -50,6 +52,7 @@ pub fn run() {
                             if s.group.is_empty() {
                                 s.group = "默认".to_string();
                             }
+                            recovered_interrupted_run |= s.recover_interrupted_run();
                             sessions.insert(s.id.clone(), s);
                         }
                         for s in config.scripts {
@@ -66,7 +69,7 @@ pub fn run() {
                 }
             }
 
-            app.manage(AppState {
+            let state = AppState {
                 sessions,
                 scripts,
                 settings: Mutex::new(settings),
@@ -75,7 +78,15 @@ pub fn run() {
                 raw_sessions: DashMap::new(),
                 port_proxies: DashMap::new(),
                 running_batches: DashMap::new(),
-            });
+            };
+
+            // Repair legacy config files that persisted the transient Running
+            // state, so subsequent starts are healthy even after another crash.
+            if recovered_interrupted_run {
+                state.save_config_to_disk();
+            }
+
+            app.manage(state);
 
             Ok(())
         })
@@ -111,6 +122,7 @@ pub fn run() {
             commands::get_settings,
             commands::set_max_concurrency,
             commands::delete_group,
+            commands::inject_ssh_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

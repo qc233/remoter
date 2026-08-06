@@ -13,9 +13,9 @@ use std::time::Duration;
 use crate::models::*;
 use crate::state::AppState;
 
-pub fn resolve_path(key_path: &str, app_handle: &AppHandle) -> PathBuf {
+pub fn resolve_path(key_path: &str, home_dir: Option<PathBuf>) -> PathBuf {
     if key_path.starts_with('~') {
-        if let Ok(home) = app_handle.path().home_dir() {
+        if let Some(home) = home_dir {
             let mut path = home;
             if key_path.starts_with("~/") || key_path.starts_with("~\\") {
                 path.push(&key_path[2..]);
@@ -31,10 +31,10 @@ pub fn resolve_path(key_path: &str, app_handle: &AppHandle) -> PathBuf {
     PathBuf::from(key_path)
 }
 
-pub fn authenticate_session(app_handle: &AppHandle, sess: &mut Session, session_info: &SessionInfo) -> Result<(), String> {
+pub fn authenticate_session(home_dir: Option<PathBuf>, sess: &mut Session, session_info: &SessionInfo) -> Result<(), String> {
     if let Some(ref key_path) = session_info.key_path {
         if !key_path.is_empty() {
-            let resolved_path = resolve_path(key_path, app_handle);
+            let resolved_path = resolve_path(key_path, home_dir);
             
             if !resolved_path.exists() {
                 return Err(format!("Private key file not found: {:?}", resolved_path));
@@ -116,8 +116,11 @@ pub async fn start_ssh_session(
     let mut sess = Session::new().map_err(|e| e.to_string())?;
     sess.set_tcp_stream(tcp);
     sess.handshake().map_err(|e| e.to_string())?;
+    
+    // Set keepalive: 40 seconds interval, server reply requested
+    sess.set_keepalive(true, 40);
 
-    authenticate_session(&app_handle, &mut sess, &session_info)?;
+    authenticate_session(app_handle.path().home_dir().ok(), &mut sess, &session_info)?;
 
     let mut channel = sess.channel_session().map_err(|e| e.to_string())?;
     channel.request_pty("xterm-256color", None, Some((cols, rows, 0, 0))).map_err(|e| e.to_string())?;
@@ -141,6 +144,7 @@ pub async fn start_ssh_session(
     let app_clone = app_handle.clone();
     let instance_id_clone = instance_id.clone();
     let channel_for_read = channel.clone();
+    let session_clone = session_arc.clone();
     
     thread::spawn(move || {
         let mut buffer = [0u8; 8192];
@@ -152,6 +156,8 @@ pub async fn start_ssh_session(
         let mut motd_limit = 0;
         let boot_start = std::time::Instant::now();
         let sentinel = "__REMOTER_SYNC_DONE__"; 
+        
+        let mut last_keepalive = std::time::Instant::now();
 
         loop {
             {
@@ -164,6 +170,14 @@ pub async fn start_ssh_session(
             let mut data_received = None;
             let mut closed = false;
             let mut would_block = true;
+
+            // Send keep-alive if needed (every 10 seconds check, libssh2 handles the 40s interval)
+            if last_keepalive.elapsed() >= Duration::from_secs(10) {
+                if let Some(sess) = session_clone.try_lock() {
+                    let _ = sess.keepalive_send();
+                    last_keepalive = std::time::Instant::now();
+                }
+            }
 
             {
                 let mut chan = channel_for_read.lock();
@@ -392,11 +406,14 @@ pub async fn run_command_all(
                 sess.set_tcp_stream(tcp);
                 sess.handshake().map_err(|e| e.to_string())?;
 
+                // Set keepalive: 40 seconds interval
+                sess.set_keepalive(true, 40);
+
                 if !state_ref.is_batch_running(&batch_id_thread) {
                     return Err("Cancelled by user".to_string());
                 }
 
-                authenticate_session(&app_clone_thread, &mut sess, &session_info)?;
+                authenticate_session(app_clone_thread.path().home_dir().ok(), &mut sess, &session_info)?;
 
                 let mut channel = sess.channel_session().map_err(|e| e.to_string())?;
                 
@@ -422,10 +439,19 @@ pub async fn run_command_all(
                 let mut buf = [0u8; 8192];
                 let state_ref = app_clone_thread.state::<AppState>();
                 
+                let mut last_keepalive = std::time::Instant::now();
+
                 loop {
                     if !state_ref.is_batch_running(&batch_id_thread) {
                         return Err("Cancelled by user".to_string());
                     }
+
+                    // Send keep-alive
+                    if last_keepalive.elapsed() >= Duration::from_secs(10) {
+                        let _ = sess.keepalive_send();
+                        last_keepalive = std::time::Instant::now();
+                    }
+
                     match channel.read(&mut buf) {
                         Ok(0) => break,
                         Ok(n) => {
@@ -549,11 +575,14 @@ pub async fn distribute_file(
                 sess.set_tcp_stream(tcp);
                 sess.handshake().map_err(|e| e.to_string())?;
 
+                // Set keepalive: 40 seconds interval
+                sess.set_keepalive(true, 40);
+
                 if !state_ref.is_batch_running(&batch_id_thread) {
                     return Err("Cancelled by user".to_string());
                 }
 
-                authenticate_session(&app_clone_thread, &mut sess, &session_info)?;
+                authenticate_session(app_clone_thread.path().home_dir().ok(), &mut sess, &session_info)?;
 
                 let mut remote_path = remote_dir_thread;
                 if !remote_path.ends_with('/') && !remote_path.is_empty() {
@@ -570,10 +599,19 @@ pub async fn distribute_file(
                 
                 // Chunked write for cancellation
                 let chunk_size = 65536; // 64KB chunks
+                let mut last_keepalive = std::time::Instant::now();
+
                 for chunk in file_content_clone.chunks(chunk_size) {
                     if !state_ref.is_batch_running(&batch_id_thread) {
                         return Err("Cancelled by user".to_string());
                     }
+
+                    // Send keep-alive
+                    if last_keepalive.elapsed() >= Duration::from_secs(10) {
+                        let _ = sess.keepalive_send();
+                        last_keepalive = std::time::Instant::now();
+                    }
+
                     remote_file.write_all(chunk).map_err(|e| e.to_string())?;
                 }
                 
@@ -674,11 +712,14 @@ pub async fn distribute_file_data(
                 sess.set_tcp_stream(tcp);
                 sess.handshake().map_err(|e| e.to_string())?;
 
+                // Set keepalive: 40 seconds interval
+                sess.set_keepalive(true, 40);
+
                 if !state_ref.is_batch_running(&batch_id_thread) {
                     return Err("Cancelled by user".to_string());
                 }
 
-                authenticate_session(&app_clone_thread, &mut sess, &session_info)?;
+                authenticate_session(app_clone_thread.path().home_dir().ok(), &mut sess, &session_info)?;
 
                 let mut remote_path = remote_dir_thread;
                 if !remote_path.ends_with('/') && !remote_path.is_empty() {
@@ -695,10 +736,19 @@ pub async fn distribute_file_data(
                 
                 // Chunked write for cancellation
                 let chunk_size = 65536; // 64KB chunks
+                let mut last_keepalive = std::time::Instant::now();
+
                 for chunk in file_content_clone.chunks(chunk_size) {
                     if !state_ref.is_batch_running(&batch_id_thread) {
                         return Err("Cancelled by user".to_string());
                     }
+
+                    // Send keep-alive
+                    if last_keepalive.elapsed() >= Duration::from_secs(10) {
+                        let _ = sess.keepalive_send();
+                        last_keepalive = std::time::Instant::now();
+                    }
+
                     remote_file.write_all(chunk).map_err(|e| e.to_string())?;
                 }
                 
@@ -786,8 +836,11 @@ pub async fn start_port_proxy(
                         };
                         sess.set_tcp_stream(tcp);
                         if sess.handshake().is_err() { return; }
+                        
+                        // Set keepalive: 40 seconds interval
+                        sess.set_keepalive(true, 40);
 
-                        if authenticate_session(&app_handle_clone, &mut sess, &sess_info).is_err() {
+                        if authenticate_session(app_handle_clone.path().home_dir().ok(), &mut sess, &sess_info).is_err() {
                             return;
                         }
 
@@ -801,9 +854,16 @@ pub async fn start_port_proxy(
 
                         let mut buf1 = [0u8; 8192];
                         let mut buf2 = [0u8; 8192];
+                        let mut last_keepalive = std::time::Instant::now();
 
                         loop {
                             let mut read_something = false;
+
+                            // Send keep-alive
+                            if last_keepalive.elapsed() >= Duration::from_secs(10) {
+                                let _ = sess.keepalive_send();
+                                last_keepalive = std::time::Instant::now();
+                            }
 
                             match local_stream.read(&mut buf1) {
                                 Ok(0) => break,
